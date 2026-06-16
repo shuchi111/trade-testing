@@ -1,0 +1,98 @@
+# CircleCI pipeline — self-contained cron (agent/ in this repo, no clone).
+
+version: 2.1
+
+parameters:
+  mode:
+    description: batch = all 22 tickers | price_refresh = stale rows | both
+    type: enum
+    enum: ["batch", "price_refresh", "both"]
+    default: batch
+  tickers_override:
+    description: Optional comma-separated tickers (smoke test only). Empty = RECOMMENDATION_TICKERS (22).
+    type: string
+    default: ""
+  trade_date:
+    description: YYYY-MM-DD for batch. Empty = UTC today.
+    type: string
+    default: ""
+
+commands:
+  verify-secrets:
+    steps:
+      - run:
+          name: Verify secrets
+          command: bash scripts/verify-secrets.sh
+
+  install-agent-deps:
+    steps:
+      - run:
+          name: Install agent dependencies
+          command: bash scripts/install-deps.sh
+
+jobs:
+  ai-recommendations:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PRICE_REFRESH_RATIO: "0.03"
+      MAX_CACHE_AGE_DAYS: "10"
+    steps:
+      - checkout
+      - run:
+          name: Export pipeline parameters
+          command: |
+            set -euo pipefail
+            {
+              echo "export PIPELINE_MODE='<< pipeline.parameters.mode >>'"
+              echo "export TICKERS_OVERRIDE='<< pipeline.parameters.tickers_override >>'"
+              echo "export TRADE_DATE_INPUT='<< pipeline.parameters.trade_date >>'"
+              echo "export REPO_ROOT='${PWD}'"
+            } >> "$BASH_ENV"
+      - verify-secrets
+      - install-agent-deps
+      - run:
+          name: Run batch (all 22 tickers — write cache + execute trades)
+          no_output_timeout: 180m
+          command: |
+            set -euo pipefail
+            case "${PIPELINE_MODE}" in
+              batch|both)
+                bash scripts/run-batch.sh
+                ;;
+              price_refresh)
+                echo "Skipping batch (mode=${PIPELINE_MODE})"
+                ;;
+              *)
+                echo "Unknown PIPELINE_MODE=${PIPELINE_MODE}"
+                exit 1
+                ;;
+            esac
+      - run:
+          name: Run price refresh (stale cache)
+          no_output_timeout: 60m
+          command: |
+            set -euo pipefail
+            case "${PIPELINE_MODE}" in
+              price_refresh|both)
+                bash scripts/run-price-refresh.sh
+                ;;
+              batch)
+                echo "Skipping price refresh (mode=${PIPELINE_MODE})"
+                ;;
+              *)
+                echo "Unknown PIPELINE_MODE=${PIPELINE_MODE}"
+                exit 1
+                ;;
+            esac
+
+workflows:
+  ai-recommendations:
+    jobs:
+      - ai-recommendations:
+          filters:
+            branches:
+              only: main

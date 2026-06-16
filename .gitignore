@@ -1,0 +1,40 @@
+# --- Agent runtime data (generated at cron / local runs) ---
+agent/tradingagents/dataflows/data_cache/*
+!agent/tradingagents/dataflows/data_cache/.gitkeep
+agent/eval_results/
+agent/results/
+
+# Accidental copies from private swing-trader (not used by cron)
+agent/backtest/
+agent/tests/
+agent/run_propagate.py
+
+# --- Python ---
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# Local virtualenvs
+.venv/
+venv/
+env/
+agent/.venv/
+agent/venv/
+agent/env/
+
+# --- Secrets / local env (never commit) ---
+.env
+.env.*
+!env.example
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
