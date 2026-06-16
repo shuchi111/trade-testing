@@ -13,7 +13,7 @@ parameters:
     type: string
     default: ""
   trade_date:
-    description: YYYY-MM-DD for batch. Empty = UTC today.
+    description: Optional YYYY-MM-DD override. Empty = today IST (Sat/Sun → Friday).
     type: string
     default: ""
 
@@ -52,6 +52,16 @@ jobs:
               echo "export TRADE_DATE_INPUT='<< pipeline.parameters.trade_date >>'"
               echo "export REPO_ROOT='${PWD}'"
             } >> "$BASH_ENV"
+      - run:
+          name: Resolve market trade date (IST)
+          command: |
+            set -euo pipefail
+            source scripts/market-date.sh
+            if [ -z "${TRADE_DATE_INPUT:-}" ]; then
+              echo "Trade date (auto): $(market_trade_date) (IST, NSE weekday)"
+            else
+              echo "Trade date (override): ${TRADE_DATE_INPUT}"
+            fi
       - verify-secrets
       - install-agent-deps
       - run:
@@ -91,6 +101,13 @@ jobs:
 
 workflows:
   ai-recommendations:
+    triggers:
+      # 10:00 IST Mon–Fri = 04:30 UTC (CircleCI cron is UTC)
+      - schedule:
+          cron: "30 4 * * 1-5"
+          filters:
+            branches:
+              only: main
     jobs:
       - ai-recommendations:
           filters:

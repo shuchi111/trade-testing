@@ -26,8 +26,12 @@ else
   fi
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=market-date.sh
+source "${SCRIPT_DIR}/market-date.sh"
+
 if [ -z "${trade_date_input}" ]; then
-  DATE="$(date -u +'%Y-%m-%d')"
+  DATE="$(market_trade_date)"
 else
   DATE="${trade_date_input}"
 fi

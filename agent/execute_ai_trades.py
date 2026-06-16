@@ -33,6 +33,7 @@ load_dotenv(SWING_TRADER_ROOT / ".env")
 import psycopg2
 
 from db_url import resolve_psycopg2_url
+from market_date import market_trade_date
 from portfolio_db import (
     ADMIN_WALLET_ID,
     count_open_positions,
@@ -272,7 +273,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Execute AI paper trades from recommendations")
     p.add_argument("--ticker", help="Single ticker (e.g. RELIANCE.NS)")
     p.add_argument("--all", action="store_true", help="All tickers with latest recommendation")
-    p.add_argument("--trade-date", default="", help="YYYY-MM-DD (default: UTC today)")
+    p.add_argument("--trade-date", default="", help="YYYY-MM-DD (default: IST market day)")
     p.add_argument("--dry-run", action="store_true", help="Log only, no wallet trades")
     p.add_argument("--execute", action="store_true", help="Actually execute trades (overrides settings dry_run)")
     p.add_argument("--force", action="store_true", help="Re-run even if already executed today")
@@ -283,7 +284,7 @@ def main() -> None:
         logger.error("Missing DIRECT_URL or DATABASE_URL")
         sys.exit(1)
 
-    trade_date = args.trade_date.strip() or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    trade_date = args.trade_date.strip() or market_trade_date()
 
     conn = psycopg2.connect(db_url)
     try:

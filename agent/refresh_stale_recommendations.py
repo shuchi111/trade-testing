@@ -89,9 +89,10 @@ def main() -> None:
     refreshed_tickers: list[str] = []
     skipped_tickers: list[str] = []
 
-    now_utc = dt.datetime.now(dt.timezone.utc)
-    today = now_utc.date()
-    today_str = now_utc.strftime("%Y-%m-%d")
+    from market_date import ist_today
+
+    today = ist_today()
+    today_str = today.strftime("%Y-%m-%d")
 
     try:
         for (
