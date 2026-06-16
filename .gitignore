@@ -38,3 +38,6 @@ agent/env/
 Thumbs.db
 .idea/
 .vscode/
+
+# Local sync notes (private swing-trader workflow)
+AGENT-SYNC.md
