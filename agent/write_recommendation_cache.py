@@ -37,6 +37,7 @@ load_dotenv(SWING_TRADER_ROOT / ".env")
 import psycopg2
 
 from db_url import resolve_psycopg2_url
+from market_date import adjust_to_last_trading_day, ist_today
 from portfolio_db import load_holding
 from recommendation_bucket import recommendation_bucket
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -75,22 +76,6 @@ def _build_config() -> dict:
         "news_data": os.getenv("DATA_VENDOR_NEWS", "yfinance"),
     }
     return config
-
-
-def _adjust_to_last_trading_day(d: date) -> date:
-    """Roll a date backward to the last weekday (Mon-Fri).
-
-    Handles weekends — Saturday rolls to Friday, Sunday rolls to Friday.
-    Does NOT handle exchange-specific holidays (requires pandas_market_calendars
-    or a holiday calendar — left as a future enhancement).
-    """
-    # weekday(): Mon=0 .. Sun=6
-    offset = {5: 1, 6: 2}.get(d.weekday(), 0)
-    if offset:
-        adjusted = d - timedelta(days=offset)
-        logger.info("trade_date %s is a weekend, adjusted to %s", d, adjusted)
-        return adjusted
-    return d
 
 
 def fetch_last_close(symbol: str, period: str | None = None) -> float | None:
@@ -443,13 +428,17 @@ def main() -> None:
     args = p.parse_args()
     td = args.trade_date.strip()
     if not td:
-        raw = date(timezone.utc) if hasattr(date, 'today') else datetime.now(timezone.utc).date()
-        adjusted = _adjust_to_last_trading_day(raw)
+        raw = ist_today()
+        adjusted = adjust_to_last_trading_day(raw)
+        if adjusted != raw:
+            logger.info("trade_date %s is a weekend, adjusted to %s", raw, adjusted)
         td = adjusted.strftime("%Y-%m-%d")
     else:
         try:
             parsed = datetime.strptime(td, "%Y-%m-%d").date()
-            adjusted = _adjust_to_last_trading_day(parsed)
+            adjusted = adjust_to_last_trading_day(parsed)
+            if adjusted != parsed:
+                logger.info("trade_date %s is a weekend, adjusted to %s", parsed, adjusted)
             td = adjusted.strftime("%Y-%m-%d")
         except ValueError:
             logger.error("Invalid trade_date format: %s. Expected YYYY-MM-DD.", td)

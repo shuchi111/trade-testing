@@ -10,8 +10,12 @@ Daily AI recommendations for 22 tickers via CircleCI. Self-contained — no priv
    - `DATABASE_URL`
    - `RECOMMENDATION_TICKERS` (comma-separated, no spaces)
    - `ANTHROPIC_AUTH_TOKEN` or `Z_API_KEY` (+ `ANTHROPIC_BASE_URL` if needed)
-4. Run pipeline manually once, then add a schedule trigger: `0 4 * * *`, parameter `mode=batch`.
-5. Turn off GitHub Actions `schedule:` in swing-trader if you still have it.
+4. Run pipeline manually once on `main` (leave `trade_date` empty — auto IST market day).
+5. Schedule is in `.circleci/config.yml`: **Mon–Fri 10:00 IST** (`30 4 * * 1-5` UTC).
+
+## Trade date
+
+Leave `trade_date` empty in CircleCI — it uses **today in IST**. Saturday/Sunday roll back to Friday (NSE weekdays only; holidays not skipped).
 
 ## Pipeline modes
 
