@@ -97,9 +97,10 @@ Lessons from past decisions: {past_memory_str}
 **Required Output Structure:**
 1. **Rating**: State one of Buy / Overweight / Hold / Underweight / Sell.
 2. **Executive Summary**: A concise action plan covering entry strategy, position \
-sizing, key risk levels, and time horizon.
+   sizing, key risk levels, and time horizon.
 3. **Investment Thesis**: Detailed reasoning anchored in the analysts' debate and past \
 reflections.
+4. **Backtest and live trade review**: What backtest results and live trade history imply.
 
 Rating: Buy | Overweight | Hold | Underweight | Sell
 
@@ -112,13 +113,15 @@ Time horizon: prose (multi-week swing; not day-trade framing).
 
 Investment thesis: detailed reasoning in one or more paragraphs anchored in the debate, fundamentals, and market context; explicitly tie to holdings and average entry when provided.
 
+Backtest and live trade review: summarise what the backtest strategy summary, backtest trade dates, and live trade history in portfolio context imply for this week's rating. Cite specific backtest entry/exit dates when warning against whipsaw. State days held versus the ninety-day minimum when recommending any exit.
+
 Weekly candles tie-in: how multi-week candle structure supports or contradicts the stance (pattern names in plain words).
 
 GTT target price: INR value and one sentence (tie to >3% gain versus basis when recommending profit-taking).
 
 GTT stop price: INR value and one sentence (tie to about -10% versus basis when describing ordinary risk capacity).
 
-When you write the final answer, reproduce the section labels above verbatim (Rating:, Executive summary:, then Action plan:, Entry strategy:, Position sizing:, Key risk levels:, Time horizon:, then Investment thesis:, Weekly candles tie-in:, GTT target price:, GTT stop price:) and fill in real content—do not leave the template placeholders.
+When you write the final answer, reproduce the section labels above verbatim (Rating:, Executive summary:, then Action plan:, Entry strategy:, Position sizing:, Key risk levels:, Time horizon:, then Investment thesis:, Backtest and live trade review:, Weekly candles tie-in:, GTT target price:, GTT stop price:) and fill in real content—do not leave the template placeholders.
 
 Risk Analysts Debate History:
 {history}

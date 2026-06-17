@@ -39,7 +39,11 @@ SWING_DEBATE_REMINDER = (
     "a Rs. 5 tick); always anchor to multi-week percentage gains and drawdowns versus "
     "the correct basis (average entry if the investor holds the stock, otherwise the "
     "entry or level you assume for a new position). Short-term red or green is swing "
-    "noise unless the weekly thesis breaks."
+    "noise unless the weekly thesis breaks. "
+    "After a live BUY, assume a MINIMUM NINETY CALENDAR DAY hold before SELL or UNDERWEIGHT "
+    "unless the thesis breaks (roughly minus ten percent versus average entry). "
+    "Maximum twenty-five thousand INR invested per stock. Review live trade history and "
+    "backtest trade dates supplied in portfolio context before any exit."
 )
 
 
@@ -64,6 +68,12 @@ SWING_MANAGERS_BLOCK = """Swing-trading mandate (respect throughout; do not cont
 - Unless there is roughly MORE THAN THREE PERCENT upside versus the investor basis, there is no point recommending a sale purely to bank small gains. If they already hold shares, basis is their average entry unless you explicitly redefine a new basis and explain why.
 
 - Assume maximum tolerable drawdown versus that same basis on the order of MINUS TEN PERCENT before a full protective exit / wide stop is appropriate normal risk management; cite this when you phrase GTT stops.
+
+- After a live BUY, minimum NINETY CALENDAR DAYS before SELL or UNDERWEIGHT unless thesis breaks (~-10% versus average entry). If portfolio context shows fewer days held, default to Hold unless thesis-break evidence is overwhelming.
+
+- Maximum TWENTY-FIVE THOUSAND INR total invested per stock (including adds). Do not recommend adding if at cap.
+
+- Before any SELL, deeply review live trade history, backtest strategy summary, and backtest trade log dates in portfolio context. Avoid churn patterns that backtests show as whipsaw (many trades, low win rate).
 
 - Explicit weekly candlestick reasoning is required (multi-week structure and patterns in words, built from the available OHLC history).
 

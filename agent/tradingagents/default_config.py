@@ -9,8 +9,8 @@ DEFAULT_CONFIG = {
     ),
     # LLM settings
     "llm_provider": "glm",
-    "deep_think_llm": "glm-5.1",
-    "quick_think_llm": "glm-4.7",
+    "deep_think_llm": "glm-5.2",
+    "quick_think_llm": "glm-5.2",
     "backend_url": "https://api.z.ai/api/paas/v4/",
     # Provider-specific thinking configuration
     "google_thinking_level": None,

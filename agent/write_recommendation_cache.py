@@ -38,7 +38,7 @@ import psycopg2
 
 from db_url import resolve_psycopg2_url
 from market_date import adjust_to_last_trading_day, ist_today
-from portfolio_db import load_holding
+from portfolio_db import build_analysis_context, load_holding
 from recommendation_bucket import recommendation_bucket
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
@@ -48,15 +48,15 @@ logger = logging.getLogger("write_recommendation_cache")
 
 def _build_config() -> dict:
     config = DEFAULT_CONFIG.copy()
-    config["llm_provider"] = os.getenv("LLM_PROVIDER", "***REMOVED***").strip()
+    config["llm_provider"] = os.getenv("LLM_PROVIDER", "glm").strip()
     backend = (
         (os.getenv("LLM_BACKEND_URL") or "").strip()
         or (os.getenv("ANTHROPIC_BASE_URL") or "").strip()
-        or "***REMOVED***"
+        or "https://api.z.ai/api/paas/v4/"
     )
     config["backend_url"] = backend.rstrip("/")
-    config["deep_think_llm"] = os.getenv("DEEP_THINK_LLM", "glm-5.1")
-    config["quick_think_llm"] = os.getenv("QUICK_THINK_LLM", "glm-4.7")
+    config["deep_think_llm"] = os.getenv("DEEP_THINK_LLM", "glm-5.2")
+    config["quick_think_llm"] = os.getenv("QUICK_THINK_LLM", "glm-5.2")
     config["max_debate_rounds"] = int(os.getenv("MAX_DEBATE_ROUNDS", "1"))
     config["max_recur_limit"] = int(
         os.getenv("MAX_RECUR_LIMIT", str(config.get("max_recur_limit", 1000)))
@@ -104,21 +104,33 @@ def fetch_last_close(symbol: str, period: str | None = None) -> float | None:
 
 
 def _portfolio_context(
-    ticker: str, holding_qty: float, holding_entry: float
+    conn,
+    ticker: str,
+    trade_date: str,
+    holding_qty: float,
+    holding_entry: float,
+    reference_price: float | None = None,
 ) -> str:
-    """Build one-line context injected into Trader for holdings awareness."""
-    if holding_qty > 0 and holding_entry > 0:
-        return (
-            f"You currently hold {holding_qty:.0f} units of {ticker} "
-            f"at an average entry price of {holding_entry:,.2f}. "
-            "Use this average entry as the percentage basis for swing framing (e.g. "
-            ">3% upside before favoring sells for gain-taking, ~10% drawdown tolerance) "
-            "unless the thesis breaks. Factor the position into add, hold, trim, or exit."
+    """Build rich portfolio + backtest + trade history context for LLM agents."""
+    try:
+        return build_analysis_context(
+            conn,
+            ticker,
+            trade_date=trade_date,
+            reference_price=reference_price,
         )
-    return (
-        f"Portfolio tracker: no quantity held reported for {ticker}. "
-        "Use fundamentals and risk only — this is reporting, not a prompt to trade."
-    )
+    except Exception as exc:
+        logger.warning("build_analysis_context failed for %s: %s", ticker, exc)
+        if holding_qty > 0 and holding_entry > 0:
+            return (
+                f"You currently hold {holding_qty:.0f} units of {ticker} "
+                f"at an average entry price of {holding_entry:,.2f}. "
+                "Use this average entry as the percentage basis for swing framing."
+            )
+        return (
+            f"Portfolio tracker: no quantity held reported for {ticker}. "
+            "Use fundamentals and risk only."
+        )
 
 
 def upsert_cache_row(
@@ -337,21 +349,29 @@ def run_single_recommendation(
     if holding_quantity < 0 or holding_avg_entry < 0:
         return {"ok": False, "error": "holding_quantity and holding_avg_entry must be >= 0", "ticker": ticker}
 
-    portfolio_context = _portfolio_context(ticker, holding_quantity, holding_avg_entry)
-
-    try:
-        ta = TradingAgentsGraph(debug=debug, config=cfg)
-        final_state, decision = ta.propagate(ticker, trade_date, portfolio_context=portfolio_context)
-    except Exception as e:
-        return {"ok": False, "error": str(e), "ticker": ticker, "trade_date": trade_date}
-
-    final_trade_decision = final_state.get("final_trade_decision") or ""
-
     reference_price = fetch_last_close(ticker)
 
     owns_conn = db_conn is None
     conn = psycopg2.connect(db_url) if owns_conn else db_conn
     try:
+        portfolio_context = _portfolio_context(
+            conn,
+            ticker,
+            trade_date,
+            holding_quantity,
+            holding_avg_entry,
+            reference_price=reference_price,
+        )
+
+        try:
+            ta = TradingAgentsGraph(debug=debug, config=cfg)
+            final_state, decision = ta.propagate(
+                ticker, trade_date, portfolio_context=portfolio_context
+            )
+        except Exception as e:
+            return {"ok": False, "error": str(e), "ticker": ticker, "trade_date": trade_date}
+
+        final_trade_decision = final_state.get("final_trade_decision") or ""
         upsert_cache_row(
             conn,
             ticker=ticker,
@@ -446,23 +466,30 @@ def main() -> None:
 
     holding_qty = 0.0 if args.holding_qty is None else args.holding_qty
     holding_entry = 0.0 if args.holding_entry is None else args.holding_entry
+    db_conn = None
     if args.from_portfolio:
         db_url = resolve_psycopg2_url()
         if db_url:
-            conn = psycopg2.connect(db_url)
+            db_conn = psycopg2.connect(db_url)
             try:
-                holding_qty, holding_entry = load_holding(conn, args.ticker)
-            finally:
-                conn.close()
+                holding_qty, holding_entry = load_holding(db_conn, args.ticker)
+            except Exception:
+                db_conn.close()
+                db_conn = None
 
-    out = run_single_recommendation(
-        ticker=args.ticker,
-        trade_date=td,
-        holding_quantity=holding_qty,
-        holding_avg_entry=holding_entry,
-        source=args.source,
-        debug=args.debug,
-    )
+    try:
+        out = run_single_recommendation(
+            ticker=args.ticker,
+            trade_date=td,
+            holding_quantity=holding_qty,
+            holding_avg_entry=holding_entry,
+            source=args.source,
+            debug=args.debug,
+            db_conn=db_conn,
+        )
+    finally:
+        if db_conn is not None:
+            db_conn.close()
     if not out.get("ok"):
         logger.error("%s", out)
         sys.exit(1)

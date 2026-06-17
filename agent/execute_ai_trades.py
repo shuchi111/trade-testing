@@ -16,7 +16,6 @@ import json
 import logging
 import os
 import sys
-from datetime import date, datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -36,6 +35,7 @@ from db_url import resolve_psycopg2_url
 from market_date import market_trade_date
 from portfolio_db import (
     ADMIN_WALLET_ID,
+    can_sell_under_min_hold,
     count_open_positions,
     execute_trade,
     load_holding,
@@ -43,6 +43,7 @@ from portfolio_db import (
     portfolio_value,
 )
 from recommendation_bucket import is_overweight, recommendation_bucket
+from trading_constraints import max_position_inr
 from write_recommendation_cache import fetch_last_close
 
 logger = logging.getLogger("execute_ai_trades")
@@ -61,20 +62,23 @@ def load_settings(conn) -> dict:
         )
         row = cur.fetchone()
     if not row:
-        return {
+        base = {
             "auto_trade": True,
             "dry_run": False,
             "max_position_pct": 0.15,
             "max_positions": 5,
             "min_cash_reserve_pct": 0.20,
         }
-    return {
-        "auto_trade": bool(row[0]),
-        "dry_run": bool(row[1]),
-        "max_position_pct": float(row[2]),
-        "max_positions": int(row[3]),
-        "min_cash_reserve_pct": float(row[4]),
-    }
+    else:
+        base = {
+            "auto_trade": bool(row[0]),
+            "dry_run": bool(row[1]),
+            "max_position_pct": float(row[2]),
+            "max_positions": int(row[3]),
+            "min_cash_reserve_pct": float(row[4]),
+        }
+    base["max_position_inr"] = max_position_inr()
+    return base
 
 
 def latest_recommendation(conn, ticker: str, trade_date: str) -> dict | None:
@@ -202,36 +206,58 @@ def decide_and_execute(
     max_pos_pct = settings["max_position_pct"]
     min_reserve = settings["min_cash_reserve_pct"]
     max_positions = settings["max_positions"]
+    max_inr = settings.get("max_position_inr") or max_position_inr()
 
     action = "HOLD"
     qty = 0.0
     skip_reason = None
-    size_mult = 1.0
+    size_mult = 1.0 if not is_overweight(decision) else 1.0
+
+    current_position_value = hold_qty * price
+    room_to_cap = max(0.0, max_inr - current_position_value)
 
     if bucket == "buy":
         if hold_qty > 0 and not is_overweight(decision):
             action, skip_reason = "SKIP", "already_holding_no_overweight"
+        elif room_to_cap < price:
+            action, skip_reason = "SKIP", "max_position_cap_reached"
         elif count_open_positions(conn) >= max_positions and hold_qty <= 0:
             action, skip_reason = "SKIP", "max_positions_reached"
+        elif cash <= 0:
+            action, skip_reason = "SKIP", "insufficient_cash"
         else:
             deployable = max(0.0, cash - port_val * min_reserve)
             target_value = port_val * max_pos_pct * size_mult
-            buy_value = min(deployable, target_value)
+            buy_value = min(deployable, target_value, room_to_cap, cash)
             if buy_value < price:
                 action, skip_reason = "SKIP", "insufficient_cash"
             else:
                 qty = int(buy_value // price)
+                cost = qty * price
                 if qty <= 0:
                     action, skip_reason = "SKIP", "quantity_zero"
+                elif cost > cash:
+                    qty = int(cash // price)
+                    cost = qty * price
+                    if qty <= 0:
+                        action, skip_reason = "SKIP", "insufficient_cash"
+                    else:
+                        action = "BUY"
                 else:
                     action = "BUY"
 
     elif bucket == "sell":
-        if hold_qty > 0:
-            action = "SELL"
-            qty = hold_qty
-        else:
+        if hold_qty <= 0:
             action, skip_reason = "HOLD", "no_position_to_sell"
+        else:
+            allowed, hold_skip = can_sell_under_min_hold(
+                conn, ticker, trade_date, avg_entry, price
+            )
+            if not allowed:
+                action, skip_reason = "SKIP", hold_skip
+            else:
+                action = "SELL"
+                qty = hold_qty
 
     else:
         action = "HOLD"
@@ -242,10 +268,14 @@ def decide_and_execute(
     executed = False
     pnl = None
     if action in ("BUY", "SELL") and not dry_run:
-        execute_trade(conn, ticker=ticker, action=action, quantity=qty, price=price)
-        executed = True
-        if action == "SELL" and avg_entry > 0:
-            pnl = (price - avg_entry) * qty
+        try:
+            execute_trade(conn, ticker=ticker, action=action, quantity=qty, price=price)
+            executed = True
+            if action == "SELL" and avg_entry > 0:
+                pnl = (price - avg_entry) * qty
+        except ValueError as exc:
+            action, skip_reason = "SKIP", "insufficient_cash"
+            logger.warning("Trade blocked for %s: %s", ticker, exc)
 
     log_execution(
         conn, ticker=ticker, trade_date=trade_date, decision=decision,
