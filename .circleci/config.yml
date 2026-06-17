@@ -1,4 +1,3 @@
-# CircleCI pipeline — self-contained cron (agent/ in this repo, no clone).
 
 version: 2.1
 
@@ -30,18 +29,8 @@ commands:
           name: Install agent dependencies
           command: bash scripts/install-deps.sh
 
-jobs:
-  ai-recommendations:
-    docker:
-      - image: cimg/python:3.12
-    resource_class: medium
-    working_directory: ~/project
-    environment:
-      PYTHONUNBUFFERED: "1"
-      PRICE_REFRESH_RATIO: "0.03"
-      MAX_CACHE_AGE_DAYS: "10"
+  export-pipeline-env:
     steps:
-      - checkout
       - run:
           name: Export pipeline parameters
           command: |
@@ -52,21 +41,45 @@ jobs:
               echo "export TRADE_DATE_INPUT='<< pipeline.parameters.trade_date >>'"
               echo "export REPO_ROOT='${PWD}'"
             } >> "$BASH_ENV"
+
+  resolve-market-date:
+    steps:
       - run:
           name: Resolve market trade date (IST)
           command: |
             set -euo pipefail
             source scripts/market-date.sh
+            echo "Current time (IST): $(ist_now)"
             if [ -z "${TRADE_DATE_INPUT:-}" ]; then
               echo "Trade date (auto): $(market_trade_date) (IST, NSE weekday)"
             else
               echo "Trade date (override): ${TRADE_DATE_INPUT}"
             fi
+
+jobs:
+  batch-shard:
+    parameters:
+      shard_index:
+        type: integer
+      shard_total:
+        type: integer
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    environment:
+      PYTHONUNBUFFERED: "1"
+      TICKER_SHARD_INDEX: << parameters.shard_index >>
+      TICKER_SHARD_TOTAL: << parameters.shard_total >>
+    steps:
+      - checkout
+      - export-pipeline-env
+      - resolve-market-date
       - verify-secrets
       - install-agent-deps
       - run:
-          name: Run batch (all 22 tickers — write cache + execute trades)
-          no_output_timeout: 180m
+          name: Run batch shard (recommendations only)
+          no_output_timeout: 55m
           command: |
             set -euo pipefail
             case "${PIPELINE_MODE}" in
@@ -81,6 +94,51 @@ jobs:
                 exit 1
                 ;;
             esac
+
+  execute-ai-trades:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    environment:
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - checkout
+      - export-pipeline-env
+      - resolve-market-date
+      - verify-secrets
+      - install-agent-deps
+      - run:
+          name: Execute paper trades (all tickers)
+          no_output_timeout: 30m
+          command: |
+            set -euo pipefail
+            case "${PIPELINE_MODE}" in
+              batch|both)
+                bash scripts/run-execute.sh
+                ;;
+              price_refresh)
+                echo "Skipping execute (mode=${PIPELINE_MODE})"
+                ;;
+              *)
+                exit 1
+                ;;
+            esac
+
+  price-refresh:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    working_directory: ~/project
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PRICE_REFRESH_RATIO: "0.03"
+      MAX_CACHE_AGE_DAYS: "10"
+    steps:
+      - checkout
+      - export-pipeline-env
+      - verify-secrets
+      - install-agent-deps
       - run:
           name: Run price refresh (stale cache)
           no_output_timeout: 60m
@@ -90,31 +148,95 @@ jobs:
               price_refresh|both)
                 bash scripts/run-price-refresh.sh
                 ;;
-              batch)
-                echo "Skipping price refresh (mode=${PIPELINE_MODE})"
-                ;;
               *)
-                echo "Unknown PIPELINE_MODE=${PIPELINE_MODE}"
-                exit 1
+                echo "Skipping price refresh (mode=${PIPELINE_MODE})"
                 ;;
             esac
 
 workflows:
-  # Daily cron: 10:00 IST Mon–Fri = 04:30 UTC
+  # Daily cron: 10:30 IST Mon–Fri = 05:00 UTC
   scheduled-ai-recommendations:
     triggers:
       - schedule:
-          cron: "30 4 * * 1-5"
+          cron: "0 5 * * 1-5"
           filters:
             branches:
               only: main
     jobs:
-      - ai-recommendations
+      - batch-shard:
+          name: batch-shard-0
+          shard_index: 0
+          shard_total: 5
+      - batch-shard:
+          name: batch-shard-1
+          shard_index: 1
+          shard_total: 5
+      - batch-shard:
+          name: batch-shard-2
+          shard_index: 2
+          shard_total: 5
+      - batch-shard:
+          name: batch-shard-3
+          shard_index: 3
+          shard_total: 5
+      - batch-shard:
+          name: batch-shard-4
+          shard_index: 4
+          shard_total: 5
+      - execute-ai-trades:
+          requires:
+            [batch-shard-0, batch-shard-1, batch-shard-2, batch-shard-3, batch-shard-4]
 
   # Manual "Trigger Pipeline" from CircleCI UI
   manual-ai-recommendations:
     jobs:
-      - ai-recommendations:
+      - batch-shard:
+          name: batch-shard-0
+          shard_index: 0
+          shard_total: 5
           filters:
             branches:
               only: main
+      - batch-shard:
+          name: batch-shard-1
+          shard_index: 1
+          shard_total: 5
+          filters:
+            branches:
+              only: main
+      - batch-shard:
+          name: batch-shard-2
+          shard_index: 2
+          shard_total: 5
+          filters:
+            branches:
+              only: main
+      - batch-shard:
+          name: batch-shard-3
+          shard_index: 3
+          shard_total: 5
+          filters:
+            branches:
+              only: main
+      - batch-shard:
+          name: batch-shard-4
+          shard_index: 4
+          shard_total: 5
+          filters:
+            branches:
+              only: main
+      - execute-ai-trades:
+          requires:
+            [batch-shard-0, batch-shard-1, batch-shard-2, batch-shard-3, batch-shard-4]
+          filters:
+            branches:
+              only: main
+      - price-refresh:
+          requires: [execute-ai-trades]
+          filters:
+            branches:
+              only: main
+          when:
+            or:
+              - equal: [price_refresh, << pipeline.parameters.mode >>]
+              - equal: [both, << pipeline.parameters.mode >>]

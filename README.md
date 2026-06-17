@@ -11,7 +11,7 @@ Daily AI recommendations for 22 tickers via CircleCI. Self-contained — no priv
    - `RECOMMENDATION_TICKERS` (comma-separated, no spaces)
    - `ANTHROPIC_AUTH_TOKEN` or `Z_API_KEY` (+ `ANTHROPIC_BASE_URL` if needed)
 4. Run pipeline manually once on `main` (leave `trade_date` empty — auto IST market day).
-5. Schedule is in `.circleci/config.yml`: **Mon–Fri 10:00 IST** (`30 4 * * 1-5` UTC).
+5. Schedule is in `.circleci/config.yml`: **Mon–Fri 10:30 IST** (`0 5 * * 1-5` UTC).
 
 ## Trade date
 
