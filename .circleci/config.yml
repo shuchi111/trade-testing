@@ -102,6 +102,8 @@ jobs:
     working_directory: ~/project
     environment:
       PYTHONUNBUFFERED: "1"
+      PRICE_REFRESH_RATIO: "0.03"
+      MAX_CACHE_AGE_DAYS: "10"
     steps:
       - checkout
       - export-pipeline-env
@@ -124,21 +126,6 @@ jobs:
                 exit 1
                 ;;
             esac
-
-  price-refresh:
-    docker:
-      - image: cimg/python:3.12
-    resource_class: medium
-    working_directory: ~/project
-    environment:
-      PYTHONUNBUFFERED: "1"
-      PRICE_REFRESH_RATIO: "0.03"
-      MAX_CACHE_AGE_DAYS: "10"
-    steps:
-      - checkout
-      - export-pipeline-env
-      - verify-secrets
-      - install-agent-deps
       - run:
           name: Run price refresh (stale cache)
           no_output_timeout: 60m
@@ -231,12 +218,3 @@ workflows:
           filters:
             branches:
               only: main
-      - price-refresh:
-          requires: [execute-ai-trades]
-          filters:
-            branches:
-              only: main
-          when:
-            or:
-              - equal: [price_refresh, << pipeline.parameters.mode >>]
-              - equal: [both, << pipeline.parameters.mode >>]
