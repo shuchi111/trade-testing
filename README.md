@@ -1,6 +1,6 @@
 # trade-circleci-cron
 
-Daily AI recommendations for 22 tickers via CircleCI. Self-contained — no private repo clone.
+Daily AI recommendations for 22 tickers via CircleCI.
 
 ## Setup
 
