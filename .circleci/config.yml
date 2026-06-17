@@ -71,6 +71,10 @@ jobs:
       PYTHONUNBUFFERED: "1"
       TICKER_SHARD_INDEX: << parameters.shard_index >>
       TICKER_SHARD_TOTAL: << parameters.shard_total >>
+      LLM_PROVIDER: "glm"
+      DEEP_THINK_LLM: "glm-5.2"
+      QUICK_THINK_LLM: "glm-5.2"
+      LLM_BACKEND_URL: "https://api.z.ai/api/paas/v4/"
     steps:
       - checkout
       - export-pipeline-env
