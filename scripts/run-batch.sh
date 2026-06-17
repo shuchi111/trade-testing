@@ -43,7 +43,38 @@ if [ -z "${TICKERS}" ]; then
   exit 1
 fi
 
+shard_index="${TICKER_SHARD_INDEX:-0}"
+shard_total="${TICKER_SHARD_TOTAL:-1}"
+
+# Manual override: only shard 0 runs (other shards exit immediately)
+if [ -n "${override}" ] && [ "${shard_total}" -gt 1 ] && [ "${shard_index}" -ne 0 ]; then
+  echo "SKIP: tickers_override set — only shard 0 runs manual tickers."
+  exit 0
+fi
+
+IFS=',' read -ra ARR <<< "${TICKERS}"
+
+# Split full batch across shards (CircleCI free tier ≈ 1h job limit)
+if [ -z "${override}" ] && [ "${shard_total}" -gt 1 ]; then
+  SHARDED=()
+  for i in "${!ARR[@]}"; do
+    if [ $((i % shard_total)) -eq "${shard_index}" ]; then
+      SHARDED+=("${ARR[$i]}")
+    fi
+  done
+  ARR=("${SHARDED[@]}")
+  echo "Shard ${shard_index}/${shard_total}: ${#ARR[@]} ticker(s)"
+fi
+
+if [ ${#ARR[@]} -eq 0 ]; then
+  echo "No tickers for this shard — nothing to do."
+  exit 0
+fi
+
+TICKERS="$(IFS=','; echo "${ARR[*]}")"
+
 echo "=== Batch run ==="
+echo "Current time (IST): $(ist_now)"
 echo "Trade date: ${DATE}"
 echo "Source tag: ${SOURCE}"
 echo "Tickers:    ${TICKERS}"
@@ -73,12 +104,7 @@ for raw in "${ARR[@]}"; do
 done
 
 echo
-echo "--- AI paper-trade executor ---"
-python agent/execute_ai_trades.py --all --trade-date "${DATE}" \
-  || echo "WARN: execute_ai_trades.py exited non-zero"
-
-echo
-echo "=== Batch finished ==="
+echo "=== Batch shard finished ==="
 echo "Tickers attempted: ${COUNT}"
 echo "Tickers succeeded: ${OK}"
 
@@ -91,6 +117,6 @@ if [ "${OK}" -eq 0 ] && [ "${COUNT}" -gt 0 ]; then
   exit 1
 fi
 
-if [ "${COUNT}" -ne 22 ] && [ -z "${override}" ]; then
+if [ "${COUNT}" -ne 22 ] && [ -z "${override}" ] && [ "${shard_total}" -le 1 ]; then
   echo "WARN: Expected 22 tickers but got ${COUNT}. Check RECOMMENDATION_TICKERS."
 fi
