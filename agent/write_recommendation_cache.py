@@ -20,6 +20,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -42,6 +43,7 @@ from market_date import adjust_to_last_trading_day, ist_today
 from portfolio_db import build_analysis_context, load_holding
 from recommendation_bucket import recommendation_bucket
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.graph.signal_processing import is_transient_propagate_error
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 logger = logging.getLogger("write_recommendation_cache")
@@ -85,6 +87,40 @@ def _build_config() -> dict:
         "news_data": os.getenv("DATA_VENDOR_NEWS", "yfinance"),
     }
     return config
+
+
+def _propagate_with_retry(
+    ta: TradingAgentsGraph,
+    ticker: str,
+    trade_date: str,
+    portfolio_context: str,
+):
+    """Retry full graph run on Z.ai gateway overload (HTTP 529 / code 1305)."""
+    max_attempts = int(os.getenv("PROPAGATE_MAX_ATTEMPTS", "4"))
+    base_delay = float(os.getenv("PROPAGATE_RETRY_DELAY_SEC", "60"))
+    last_err: Exception | None = None
+
+    for attempt in range(max_attempts):
+        try:
+            return ta.propagate(ticker, trade_date, portfolio_context=portfolio_context)
+        except Exception as e:
+            last_err = e
+            if attempt >= max_attempts - 1 or not is_transient_propagate_error(e):
+                raise
+            delay = base_delay * (2**attempt)
+            logger.warning(
+                "propagate retry %s/%s for %s in %.0fs: %s",
+                attempt + 1,
+                max_attempts - 1,
+                ticker,
+                delay,
+                e,
+            )
+            time.sleep(delay)
+
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError(f"propagate failed for {ticker}")
 
 
 def fetch_last_close(symbol: str, period: str | None = None) -> float | None:
@@ -352,8 +388,8 @@ def run_single_recommendation(
 
         try:
             ta = TradingAgentsGraph(debug=debug, config=cfg)
-            final_state, decision = ta.propagate(
-                ticker, trade_date, portfolio_context=portfolio_context
+            final_state, decision = _propagate_with_retry(
+                ta, ticker, trade_date, portfolio_context
             )
         except Exception as e:
             return {"ok": False, "error": str(e), "ticker": ticker, "trade_date": trade_date}

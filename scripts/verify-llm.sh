@@ -27,24 +27,38 @@ fi
 
 model="${DEEP_THINK_LLM:-glm-5.2}"
 body="$(printf '{"model":"%s","max_tokens":16,"messages":[{"role":"user","content":"Reply with exactly: OK"}]}' "${model}")"
+max_attempts="${LLM_PREFLIGHT_MAX_ATTEMPTS:-6}"
 
 echo "LLM preflight: POST ${url} (provider=${provider}, model=${model})"
 
 response_file="$(mktemp)"
 trap 'rm -f "${response_file}"' EXIT
 
-http_code="$(curl -sS -o "${response_file}" -w "%{http_code}" \
-  -X POST "${url}" \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: ${api_key}" \
-  -d "${body}")"
+attempt=0
+while [ "${attempt}" -lt "${max_attempts}" ]; do
+  attempt=$((attempt + 1))
+  http_code="$(curl -sS -o "${response_file}" -w "%{http_code}" \
+    -X POST "${url}" \
+    -H "Content-Type: application/json" \
+    -H "x-api-key: ${api_key}" \
+    -d "${body}")"
 
-if [ "${http_code}" = "200" ]; then
-  echo "LLM preflight passed (HTTP ${http_code})."
-  exit 0
-fi
+  if [ "${http_code}" = "200" ]; then
+    echo "LLM preflight passed (HTTP ${http_code}, attempt ${attempt})."
+    exit 0
+  fi
 
-echo "ERROR: LLM preflight failed (HTTP ${http_code})."
-cat "${response_file}" || true
-echo
-exit 1
+  if [ "${attempt}" -lt "${max_attempts}" ] && { [ "${http_code}" = "529" ] || [ "${http_code}" = "503" ] || [ "${http_code}" = "429" ]; }; then
+    wait_secs=$((20 * attempt))
+    echo "WARN: LLM preflight HTTP ${http_code} (Z.ai overloaded) — retry ${attempt}/${max_attempts} in ${wait_secs}s..."
+    cat "${response_file}" || true
+    echo
+    sleep "${wait_secs}"
+    continue
+  fi
+
+  echo "ERROR: LLM preflight failed (HTTP ${http_code}, attempt ${attempt})."
+  cat "${response_file}" || true
+  echo
+  exit 1
+done

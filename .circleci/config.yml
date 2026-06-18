@@ -76,6 +76,12 @@ jobs:
       QUICK_THINK_LLM: "glm-5.2"
       LLM_BACKEND_URL: "***REMOVED***"
       ANTHROPIC_BASE_URL: "***REMOVED***"
+      LLM_HTTP_MAX_RETRIES: "10"
+      SHARD_START_DELAY_SEC: "120"
+      BATCH_TICKER_DELAY_SEC: "30"
+      PROPAGATE_MAX_ATTEMPTS: "4"
+      PROPAGATE_RETRY_DELAY_SEC: "60"
+      LLM_PREFLIGHT_MAX_ATTEMPTS: "6"
     steps:
       - checkout
       - export-pipeline-env
@@ -163,26 +169,18 @@ workflows:
       - batch-shard:
           name: batch-shard-0
           shard_index: 0
-          shard_total: 5
+          shard_total: 3
       - batch-shard:
           name: batch-shard-1
           shard_index: 1
-          shard_total: 5
+          shard_total: 3
       - batch-shard:
           name: batch-shard-2
           shard_index: 2
-          shard_total: 5
-      - batch-shard:
-          name: batch-shard-3
-          shard_index: 3
-          shard_total: 5
-      - batch-shard:
-          name: batch-shard-4
-          shard_index: 4
-          shard_total: 5
+          shard_total: 3
       - execute-ai-trades:
           requires:
-            [batch-shard-0, batch-shard-1, batch-shard-2, batch-shard-3, batch-shard-4]
+            [batch-shard-0, batch-shard-1, batch-shard-2]
 
   # "Trigger Pipeline" in CircleCI UI only. Does NOT run on git push.
   manual-ai-recommendations:
@@ -192,41 +190,27 @@ workflows:
       - batch-shard:
           name: batch-shard-0
           shard_index: 0
-          shard_total: 5
+          shard_total: 3
           filters:
             branches:
               only: main
       - batch-shard:
           name: batch-shard-1
           shard_index: 1
-          shard_total: 5
+          shard_total: 3
           filters:
             branches:
               only: main
       - batch-shard:
           name: batch-shard-2
           shard_index: 2
-          shard_total: 5
-          filters:
-            branches:
-              only: main
-      - batch-shard:
-          name: batch-shard-3
-          shard_index: 3
-          shard_total: 5
-          filters:
-            branches:
-              only: main
-      - batch-shard:
-          name: batch-shard-4
-          shard_index: 4
-          shard_total: 5
+          shard_total: 3
           filters:
             branches:
               only: main
       - execute-ai-trades:
           requires:
-            [batch-shard-0, batch-shard-1, batch-shard-2, batch-shard-3, batch-shard-4]
+            [batch-shard-0, batch-shard-1, batch-shard-2]
           filters:
             branches:
               only: main

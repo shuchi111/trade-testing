@@ -77,6 +77,15 @@ export LLM_PROVIDER="${LLM_PROVIDER:-***REMOVED***}"
 export LLM_BACKEND_URL="${LLM_BACKEND_URL:-${ANTHROPIC_BASE_URL:-***REMOVED***}}"
 export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-${LLM_BACKEND_URL}}"
 
+start_delay="${SHARD_START_DELAY_SEC:-0}"
+if [ "${start_delay}" -gt 0 ] && [ "${shard_index}" -gt 0 ]; then
+  wait_secs=$((start_delay * shard_index))
+  echo "Shard ${shard_index}: waiting ${wait_secs}s before start (Z.ai overload relief)..."
+  sleep "${wait_secs}"
+fi
+
+ticker_delay="${BATCH_TICKER_DELAY_SEC:-0}"
+
 echo "=== Batch run ==="
 echo "Current time (IST): $(ist_now)"
 echo "LLM provider: ${LLM_PROVIDER}"
@@ -106,6 +115,10 @@ for raw in "${ARR[@]}"; do
   else
     FAILED+=("${sym}")
     echo "WARN: Recommendation failed for ${sym} (continuing batch)"
+  fi
+  if [ "${ticker_delay}" -gt 0 ] && [ "${COUNT}" -lt ${#ARR[@]} ]; then
+    echo "Waiting ${ticker_delay}s before next ticker..."
+    sleep "${ticker_delay}"
   fi
 done
 
