@@ -13,7 +13,7 @@ All trading limits, transaction charges, thesis-break rules, LLM defaults, and C
 3. Add env vars in Project Settings (see `env.example`):
    - `DATABASE_URL`
    - `RECOMMENDATION_TICKERS` (comma-separated, no spaces)
-   - `Z_API_KEY` or `GLM_API_KEY` (+ `LLM_PROVIDER=glm`, see `env.example`)
+   - `Z_API_KEY` or `GLM_API_KEY` (+ `LLM_PROVIDER=***REMOVED***`, see `env.example`)
 4. Test once: CircleCI → **Pipelines** → **Trigger Pipeline** on `main` (leave `trade_date` empty).
 5. Cron runs automatically **Mon–Fri 10:30 IST** (`0 5 * * 1-5` UTC) — **not on git push**.
 

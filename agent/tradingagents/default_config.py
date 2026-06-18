@@ -8,10 +8,10 @@ DEFAULT_CONFIG = {
         "dataflows/data_cache",
     ),
     # LLM settings
-    "llm_provider": "glm",
+    "llm_provider": "***REMOVED***",
     "deep_think_llm": "glm-5.2",
     "quick_think_llm": "glm-5.2",
-    "backend_url": "https://api.z.ai/api/paas/v4/",
+    "backend_url": "***REMOVED***",
     # Provider-specific thinking configuration
     "google_thinking_level": None,
     "glm_reasoning_effort": None,

@@ -49,11 +49,11 @@ logger = logging.getLogger("write_recommendation_cache")
 
 def _build_config() -> dict:
     config = DEFAULT_CONFIG.copy()
-    config["llm_provider"] = os.getenv("LLM_PROVIDER", "glm").strip()
+    config["llm_provider"] = os.getenv("LLM_PROVIDER", "***REMOVED***").strip()
     backend = (
         (os.getenv("LLM_BACKEND_URL") or "").strip()
         or (os.getenv("ANTHROPIC_BASE_URL") or "").strip()
-        or "https://api.z.ai/api/paas/v4/"
+        or "***REMOVED***"
     )
     config["backend_url"] = backend.rstrip("/")
     config["deep_think_llm"] = os.getenv("DEEP_THINK_LLM", "glm-5.2")

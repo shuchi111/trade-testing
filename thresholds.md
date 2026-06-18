@@ -136,9 +136,9 @@ Used by `refresh_stale_recommendations.py` and the `execute-ai-trades` job (pric
 
 | Setting | Default |
 |---------|---------|
-| Provider | `glm` |
+| Provider | `***REMOVED***` |
 | Models | `glm-5.2` (deep + quick) |
-| Backend URL | `https://api.z.ai/api/paas/v4/` |
+| Backend URL | `***REMOVED***` |
 | Debate rounds | **1** |
 | Risk discuss rounds | **1** |
 | Recursion limit | **1000** |
@@ -148,7 +148,7 @@ Used by `refresh_stale_recommendations.py` and the `execute-ai-trades` job (pric
 
 | Env var | Default if unset |
 |---------|------------------|
-| `LLM_PROVIDER` | `glm` |
+| `LLM_PROVIDER` | `***REMOVED***` |
 | `DEEP_THINK_LLM` / `QUICK_THINK_LLM` | `glm-5.2` |
 | `LLM_BACKEND_URL` | Z.ai URL above |
 | `MAX_DEBATE_ROUNDS` | `1` |
@@ -162,10 +162,10 @@ Used by `refresh_stale_recommendations.py` and the `execute-ai-trades` job (pric
 
 ### CircleCI `batch-shard` job (hardcoded in `.circleci/config.yml`)
 
-- `LLM_PROVIDER=glm`
+- `LLM_PROVIDER=***REMOVED***`
 - `DEEP_THINK_LLM=glm-5.2`
 - `QUICK_THINK_LLM=glm-5.2`
-- `LLM_BACKEND_URL=https://api.z.ai/api/paas/v4/`
+- `LLM_BACKEND_URL=***REMOVED***`
 
 API keys (`Z_API_KEY`, `GLM_API_KEY`, etc.) must be set in CircleCI Project Settings — see `env.example`.
 
