@@ -100,6 +100,7 @@ def is_transient_propagate_error(exc: BaseException) -> bool:
         "504",
         "429",
         "529",
+        "1305",
         "rate limit",
         "temporarily unavailable",
         "overloaded",
