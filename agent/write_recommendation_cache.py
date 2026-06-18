@@ -36,6 +36,7 @@ load_dotenv(SWING_TRADER_ROOT / ".env")
 
 import psycopg2
 
+from canonical_decision import resolve_canonical_decision
 from db_url import resolve_psycopg2_url
 from market_date import adjust_to_last_trading_day, ist_today
 from portfolio_db import build_analysis_context, load_holding
@@ -192,7 +193,7 @@ def upsert_cache_row(
                 source,
             ),
         )
-    if _is_buy_signal(decision):
+    if recommendation_bucket(decision) == "buy":
         _insert_buy_signal(
             conn,
             ticker=ticker,
@@ -253,32 +254,6 @@ def _insert_history(
         )
 
 
-_BUY_KEYWORDS = frozenset({"BUY", "OVERWEIGHT"})
-_SELL_KEYWORDS = frozenset({"SELL", "UNDERWEIGHT"})
-
-
-def _is_buy_signal(decision: str | None) -> bool:
-    """Match BUY/OVERWEIGHT anywhere in the decision string.
-
-    Handles formats like ``"BUY"``, ``"OVERWEIGHT"``, ``"RECOMMENDATION: BUY"``,
-    ``"ACTION=BUY"``, ``"BUY **strong**"`` etc. Aligned with the TypeScript
-    ``recommendationBucket()`` in ``lib/ai-recommendation/decision-bucket.ts``.
-    """
-    if not decision:
-        return False
-    u = decision.strip().upper()
-    # Exact full match
-    if u in _BUY_KEYWORDS:
-        return True
-    # First word match
-    first = u.split()[0] if u else ""
-    if first in _BUY_KEYWORDS:
-        return True
-    # Keyword appears anywhere (handles "RECOMMENDATION: BUY", "ACTION=BUY" etc.)
-    for kw in _BUY_KEYWORDS:
-        if kw in u:
-            return True
-    return False
 
 
 def _insert_buy_signal(
@@ -372,6 +347,10 @@ def run_single_recommendation(
             return {"ok": False, "error": str(e), "ticker": ticker, "trade_date": trade_date}
 
         final_trade_decision = final_state.get("final_trade_decision") or ""
+        decision = resolve_canonical_decision(
+            str(decision or ""),
+            str(final_trade_decision),
+        )
         upsert_cache_row(
             conn,
             ticker=ticker,
@@ -383,7 +362,7 @@ def run_single_recommendation(
             holding_avg_entry=float(holding_avg_entry),
             source=source,
         )
-        if owns_conn:
+        if owns_conn and not source.startswith("circleci"):
             try:
                 from execute_ai_trades import decide_and_execute, load_settings
 

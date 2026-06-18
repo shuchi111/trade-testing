@@ -9,6 +9,10 @@ ist_today() {
   date +'%Y-%m-%d'
 }
 
+ist_now() {
+  date +'%Y-%m-%d %H:%M:%S %Z'
+}
+
 market_trade_date() {
   local raw dow
   raw="$(ist_today)"

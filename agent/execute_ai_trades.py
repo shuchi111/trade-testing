@@ -31,6 +31,7 @@ load_dotenv(SWING_TRADER_ROOT / ".env")
 
 import psycopg2
 
+from canonical_decision import resolve_canonical_decision
 from db_url import resolve_psycopg2_url
 from market_date import market_trade_date
 from portfolio_db import (
@@ -43,7 +44,11 @@ from portfolio_db import (
     portfolio_value,
 )
 from recommendation_bucket import is_overweight, recommendation_bucket
-from trading_constraints import max_position_inr
+from trading_constraints import (
+    buy_transaction_charge_inr,
+    max_position_inr,
+    sell_transaction_charge_inr,
+)
 from write_recommendation_cache import fetch_last_close
 
 logger = logging.getLogger("execute_ai_trades")
@@ -85,7 +90,7 @@ def latest_recommendation(conn, ticker: str, trade_date: str) -> dict | None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, decision, reference_price, computed_at
+            SELECT id, decision, final_trade_decision, reference_price, computed_at
             FROM ai_recommendation_cache
             WHERE UPPER(ticker) = UPPER(%s) AND trade_date = %s::date
             ORDER BY computed_at DESC
@@ -98,11 +103,12 @@ def latest_recommendation(conn, ticker: str, trade_date: str) -> dict | None:
             return {
                 "id": str(row[0]),
                 "decision": row[1] or "",
-                "reference_price": float(row[2]) if row[2] is not None else None,
+                "final_trade_decision": row[2] or "",
+                "reference_price": float(row[3]) if row[3] is not None else None,
             }
         cur.execute(
             """
-            SELECT id, decision, reference_price, computed_at
+            SELECT id, decision, final_trade_decision, reference_price, computed_at
             FROM ai_recommendation_cache
             WHERE UPPER(ticker) = UPPER(%s)
             ORDER BY computed_at DESC
@@ -116,7 +122,8 @@ def latest_recommendation(conn, ticker: str, trade_date: str) -> dict | None:
     return {
         "id": str(row[0]),
         "decision": row[1] or "",
-        "reference_price": float(row[2]) if row[2] is not None else None,
+        "final_trade_decision": row[2] or "",
+        "reference_price": float(row[3]) if row[3] is not None else None,
     }
 
 
@@ -189,7 +196,10 @@ def decide_and_execute(
         )
         return {"ok": True, "ticker": ticker, "action_taken": "SKIP", "skip_reason": "no_recommendation"}
 
-    decision = reco["decision"]
+    decision = resolve_canonical_decision(
+        reco["decision"],
+        reco.get("final_trade_decision") or "",
+    )
     bucket = recommendation_bucket(decision)
     hold_qty, avg_entry = load_holding(conn, ticker)
     price = reco["reference_price"] or fetch_last_close(ticker)
@@ -226,9 +236,11 @@ def decide_and_execute(
         elif cash <= 0:
             action, skip_reason = "SKIP", "insufficient_cash"
         else:
-            deployable = max(0.0, cash - port_val * min_reserve)
+            buy_charge = buy_transaction_charge_inr()
+            cash_for_trade = max(0.0, cash - buy_charge)
+            deployable = max(0.0, cash_for_trade - port_val * min_reserve)
             target_value = port_val * max_pos_pct * size_mult
-            buy_value = min(deployable, target_value, room_to_cap, cash)
+            buy_value = min(deployable, target_value, room_to_cap, cash_for_trade)
             if buy_value < price:
                 action, skip_reason = "SKIP", "insufficient_cash"
             else:
@@ -236,8 +248,8 @@ def decide_and_execute(
                 cost = qty * price
                 if qty <= 0:
                     action, skip_reason = "SKIP", "quantity_zero"
-                elif cost > cash:
-                    qty = int(cash // price)
+                elif cost + buy_charge > cash:
+                    qty = int((cash - buy_charge) // price)
                     cost = qty * price
                     if qty <= 0:
                         action, skip_reason = "SKIP", "insufficient_cash"
@@ -269,10 +281,13 @@ def decide_and_execute(
     pnl = None
     if action in ("BUY", "SELL") and not dry_run:
         try:
-            execute_trade(conn, ticker=ticker, action=action, quantity=qty, price=price)
+            net_pnl = execute_trade(conn, ticker=ticker, action=action, quantity=qty, price=price)
             executed = True
-            if action == "SELL" and avg_entry > 0:
-                pnl = (price - avg_entry) * qty
+            if action == "SELL":
+                if net_pnl is not None:
+                    pnl = net_pnl
+                elif avg_entry > 0:
+                    pnl = (price - avg_entry) * qty - sell_transaction_charge_inr()
         except ValueError as exc:
             action, skip_reason = "SKIP", "insufficient_cash"
             logger.warning("Trade blocked for %s: %s", ticker, exc)

@@ -6,6 +6,10 @@ from langchain_openai import ChatOpenAI
 
 _ALLOWED = frozenset({"BUY", "OVERWEIGHT", "HOLD", "UNDERWEIGHT", "SELL"})
 _TOKEN_RE = re.compile(r"\b(BUY|OVERWEIGHT|HOLD|UNDERWEIGHT|SELL)\b", re.IGNORECASE)
+_RATING_LINE_RE = re.compile(
+    r"Rating\s*:\s*(Buy|Overweight|Hold|Underweight|Sell)\b",
+    re.IGNORECASE,
+)
 
 
 def _looks_like_gateway_error(text: str) -> bool:
@@ -27,18 +31,24 @@ def _looks_like_gateway_error(text: str) -> bool:
     )
 
 
-def _extract_token_from_text(text: str) -> str | None:
-    """First valid rating token in LLM output."""
-    if not text or _looks_like_gateway_error(text):
+def _normalize_rating_word(word: str) -> str:
+    return word.strip().upper()
+
+
+def _rating_from_report(text: str) -> str | None:
+    """Portfolio manager explicit ``Rating:`` line — authoritative for execution."""
+    m = _RATING_LINE_RE.search(text or "")
+    if not m:
         return None
-    m = _TOKEN_RE.search(text)
-    if m:
-        return m.group(1).upper()
-    return None
+    token = _normalize_rating_word(m.group(1))
+    return token if token in _ALLOWED else None
 
 
 def _fallback_from_report(full_signal: str) -> str:
-    """If the extractor LLM fails, derive a rating from the portfolio-manager report text."""
+    """Derive rating from portfolio-manager report (Rating line first, then first token)."""
+    rated = _rating_from_report(full_signal)
+    if rated:
+        return rated
     if not full_signal or not full_signal.strip():
         return "HOLD"
     m = _TOKEN_RE.search(full_signal)
@@ -49,9 +59,12 @@ def _fallback_from_report(full_signal: str) -> str:
 
 def coerce_decision_token(token: str | None, report_text: str) -> str:
     """
-    Never return gateway error strings as the decision — fall back to regex on the full report.
-    Used at the end of ``run_propagate`` as a safety net.
+    Canonical rating for DB + executor. Prefers ``Rating:`` in the full report
+    over a short extractor token (avoids BUY in prose overriding Hold).
     """
+    rated = _rating_from_report(report_text or "")
+    if rated:
+        return rated
     if token:
         t = str(token).strip()
         if t and not _looks_like_gateway_error(t):
@@ -59,6 +72,16 @@ def coerce_decision_token(token: str | None, report_text: str) -> str:
             if m:
                 return m.group(1).upper()
     return _fallback_from_report(report_text or "")
+
+
+def _extract_token_from_text(text: str) -> str | None:
+    """First valid rating token in LLM output."""
+    if not text or _looks_like_gateway_error(text):
+        return None
+    m = _TOKEN_RE.search(text)
+    if m:
+        return m.group(1).upper()
+    return None
 
 
 def is_transient_propagate_error(exc: BaseException) -> bool:
@@ -95,6 +118,10 @@ class SignalProcessor:
         self.quick_thinking_llm = quick_thinking_llm
 
     def process_signal(self, full_signal: str) -> str:
+        rated = _rating_from_report(full_signal)
+        if rated:
+            return rated
+
         messages = [
             (
                 "system",
@@ -113,8 +140,7 @@ class SignalProcessor:
                 text = raw if isinstance(raw, str) else str(raw)
                 token = _extract_token_from_text(text.strip())
                 if token and token in _ALLOWED:
-                    return token
-                # Non-retryable garbage / error-shaped body → try regex on report
+                    return coerce_decision_token(token, full_signal)
                 if attempt < attempts - 1 and (
                     not text.strip() or _looks_like_gateway_error(text)
                 ):

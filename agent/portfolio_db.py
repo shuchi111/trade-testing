@@ -5,9 +5,12 @@ from datetime import date, datetime
 from typing import Any
 
 from trading_constraints import (
+    buy_transaction_charge_inr,
     max_position_inr,
     min_hold_days,
+    sell_transaction_charge_inr,
     thesis_break_loss_pct,
+    transaction_charge_for_action,
 )
 
 ADMIN_WALLET_ID = "00000000-0000-0000-0000-000000000001"
@@ -343,6 +346,20 @@ def build_analysis_context(
         f"Wallet cash: {_fmt_inr(cash)} | Per-stock cap: {_fmt_inr(cap)} | "
         f"Room to add on this name: {_fmt_inr(room_to_cap)} (wallet must never go negative)"
     )
+    txn_buy = buy_transaction_charge_inr()
+    txn_sell = sell_transaction_charge_inr()
+    if txn_buy > 0 or txn_sell > 0:
+        parts: list[str] = []
+        if txn_buy > 0:
+            parts.append(f"BUY {_fmt_inr(txn_buy)}")
+        if txn_sell > 0:
+            parts.append(
+                f"SELL {_fmt_inr(txn_sell)} (exit penalty: STT + DP + brokerage paper model)"
+            )
+        lines.append(
+            f"Paper transaction charges: {', '.join(parts)} — "
+            "cash and sell PnL reflect applicable charges"
+        )
 
     live_trades = load_recent_portfolio_trades(conn, ticker)
     lines.append("")
@@ -444,15 +461,101 @@ def can_sell_under_min_hold(
     return False, "min_hold_period"
 
 
-def execute_trade(conn, *, ticker: str, action: str, quantity: float, price: float) -> None:
+def _deduct_transaction_charge(conn, *, ticker: str, action: str) -> float:
+    """Withdraw flat transaction charge from wallet (ledger type WITHDRAWAL)."""
+    charge = transaction_charge_for_action(action)
+    if charge <= 0:
+        return 0.0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE wallet_accounts
+               SET current_cash = current_cash - %s, updated_at = now()
+             WHERE id = %s
+            RETURNING current_cash
+            """,
+            (charge, ADMIN_WALLET_ID),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Wallet not found: {ADMIN_WALLET_ID}")
+        cash_after = float(row[0])
+        cur.execute(
+            """
+            INSERT INTO wallet_transactions (wallet_id, type, amount, balance_after, note)
+            VALUES (%s, 'WITHDRAWAL', %s, %s, %s)
+            """,
+            (
+                ADMIN_WALLET_ID,
+                charge,
+                cash_after,
+                f"txn_charge {action} {ticker.upper()}",
+            ),
+        )
+    return charge
+
+
+def _adjust_latest_sell_pnl(conn, ticker: str, charge: float) -> float | None:
+    """Subtract sell-leg charge from the most recent SELL row (net realized PnL)."""
+    if charge <= 0:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT realized_pnl FROM portfolio_trades
+                WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s) AND action = 'SELL'
+                ORDER BY trade_time DESC LIMIT 1
+                """,
+                (ADMIN_WALLET_ID, ticker),
+            )
+            row = cur.fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE portfolio_trades
+               SET realized_pnl = realized_pnl - %s
+             WHERE id = (
+               SELECT id FROM portfolio_trades
+               WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s) AND action = 'SELL'
+               ORDER BY trade_time DESC LIMIT 1
+             )
+            RETURNING realized_pnl
+            """,
+            (charge, ADMIN_WALLET_ID, ticker),
+        )
+        row = cur.fetchone()
+    return float(row[0]) if row and row[0] is not None else None
+
+
+def execute_trade(conn, *, ticker: str, action: str, quantity: float, price: float) -> float | None:
+    """
+    Execute paper trade via ``execute_wallet_trade``.
+
+    Applies per-leg charges from ``BUY_TRANSACTION_CHARGE_INR`` / ``SELL_TRANSACTION_CHARGE_INR``
+    (deducted from cash; SELL ``realized_pnl`` is net of sell charge).
+    Returns net ``realized_pnl`` for SELL, else ``None``.
+    """
+    ticker = ticker.upper()
+    charge = transaction_charge_for_action(action)
     if action == "BUY":
         cash = load_wallet_cash(conn)
         cost = quantity * price
-        if cost > cash:
-            raise ValueError(f"Insufficient cash: need {_fmt_inr(cost)}, have {_fmt_inr(cash)}")
+        total = cost + charge
+        if total > cash:
+            raise ValueError(
+                f"Insufficient cash: need {_fmt_inr(total)} "
+                f"(trade {_fmt_inr(cost)} + charge {_fmt_inr(charge)}), have {_fmt_inr(cash)}"
+            )
     with conn.cursor() as cur:
         cur.execute(
             "SELECT execute_wallet_trade(%s::uuid, %s, %s, %s, %s)",
-            (ADMIN_WALLET_ID, ticker.upper(), action, quantity, price),
+            (ADMIN_WALLET_ID, ticker, action, quantity, price),
         )
+    net_pnl: float | None = None
+    if charge > 0:
+        _deduct_transaction_charge(conn, ticker=ticker, action=action)
+    if action == "SELL":
+        net_pnl = _adjust_latest_sell_pnl(conn, ticker, charge)
     conn.commit()
+    return net_pnl

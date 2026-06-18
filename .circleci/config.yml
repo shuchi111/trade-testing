@@ -108,6 +108,7 @@ jobs:
       PYTHONUNBUFFERED: "1"
       PRICE_REFRESH_RATIO: "0.03"
       MAX_CACHE_AGE_DAYS: "10"
+      SELL_TRANSACTION_CHARGE_INR: "150"
     steps:
       - checkout
       - export-pipeline-env
@@ -145,8 +146,12 @@ jobs:
             esac
 
 workflows:
-  # Daily cron: 10:30 IST Mon–Fri = 05:00 UTC
+  # Cron only (10:30 IST Mon–Fri = 05:00 UTC). Does NOT run on git push.
   scheduled-ai-recommendations:
+    when:
+      or:
+        - equal: [schedule, << pipeline.trigger_source >>]
+        - equal: [scheduled_pipeline, << pipeline.trigger_source >>]
     triggers:
       - schedule:
           cron: "0 5 * * 1-5"
@@ -178,8 +183,10 @@ workflows:
           requires:
             [batch-shard-0, batch-shard-1, batch-shard-2, batch-shard-3, batch-shard-4]
 
-  # Manual "Trigger Pipeline" from CircleCI UI
+  # "Trigger Pipeline" in CircleCI UI only. Does NOT run on git push.
   manual-ai-recommendations:
+    when:
+      equal: [api, << pipeline.trigger_source >>]
     jobs:
       - batch-shard:
           name: batch-shard-0
