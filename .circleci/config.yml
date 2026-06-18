@@ -78,10 +78,10 @@ jobs:
       ANTHROPIC_BASE_URL: "***REMOVED***"
       LLM_HTTP_MAX_RETRIES: "2"
       LLM_REQUEST_GAP_SEC: "8"
-      BATCH_TICKER_DELAY_SEC: "60"
-      PROPAGATE_MAX_ATTEMPTS: "8"
-      PROPAGATE_RETRY_DELAY_SEC: "180"
-      PROPAGATE_RETRY_MAX_DELAY_SEC: "600"
+      BATCH_TICKER_DELAY_SEC: "30"
+      PROPAGATE_MAX_ATTEMPTS: "5"
+      PROPAGATE_RETRY_DELAY_SEC: "120"
+      PROPAGATE_RETRY_MAX_DELAY_SEC: "300"
       LLM_PREFLIGHT_MAX_ATTEMPTS: "10"
       LLM_PREFLIGHT_STRICT: "0"
     steps:
@@ -92,7 +92,7 @@ jobs:
       - install-agent-deps
       - run:
           name: Run batch shard (recommendations only)
-          no_output_timeout: 90m
+          no_output_timeout: 50m
           command: |
             set -euo pipefail
             case "${PIPELINE_MODE}" in
@@ -171,22 +171,40 @@ workflows:
       - batch-shard:
           name: batch-shard-0
           shard_index: 0
-          shard_total: 3
+          shard_total: 6
       - batch-shard:
           name: batch-shard-1
           shard_index: 1
-          shard_total: 3
+          shard_total: 6
           requires:
             - batch-shard-0
       - batch-shard:
           name: batch-shard-2
           shard_index: 2
-          shard_total: 3
+          shard_total: 6
           requires:
             - batch-shard-1
-      - execute-ai-trades:
+      - batch-shard:
+          name: batch-shard-3
+          shard_index: 3
+          shard_total: 6
           requires:
             - batch-shard-2
+      - batch-shard:
+          name: batch-shard-4
+          shard_index: 4
+          shard_total: 6
+          requires:
+            - batch-shard-3
+      - batch-shard:
+          name: batch-shard-5
+          shard_index: 5
+          shard_total: 6
+          requires:
+            - batch-shard-4
+      - execute-ai-trades:
+          requires:
+            - batch-shard-5
 
   # "Trigger Pipeline" in CircleCI UI only. Does NOT run on git push.
   manual-ai-recommendations:
@@ -196,14 +214,14 @@ workflows:
       - batch-shard:
           name: batch-shard-0
           shard_index: 0
-          shard_total: 3
+          shard_total: 6
           filters:
             branches:
               only: main
       - batch-shard:
           name: batch-shard-1
           shard_index: 1
-          shard_total: 3
+          shard_total: 6
           requires:
             - batch-shard-0
           filters:
@@ -212,15 +230,42 @@ workflows:
       - batch-shard:
           name: batch-shard-2
           shard_index: 2
-          shard_total: 3
+          shard_total: 6
           requires:
             - batch-shard-1
           filters:
             branches:
               only: main
-      - execute-ai-trades:
+      - batch-shard:
+          name: batch-shard-3
+          shard_index: 3
+          shard_total: 6
           requires:
             - batch-shard-2
+          filters:
+            branches:
+              only: main
+      - batch-shard:
+          name: batch-shard-4
+          shard_index: 4
+          shard_total: 6
+          requires:
+            - batch-shard-3
+          filters:
+            branches:
+              only: main
+      - batch-shard:
+          name: batch-shard-5
+          shard_index: 5
+          shard_total: 6
+          requires:
+            - batch-shard-4
+          filters:
+            branches:
+              only: main
+      - execute-ai-trades:
+          requires:
+            - batch-shard-5
           filters:
             branches:
               only: main

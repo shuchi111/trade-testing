@@ -89,6 +89,17 @@ def _build_config() -> dict:
     return config
 
 
+def _sleep_with_heartbeat(seconds: float, label: str) -> None:
+    """Sleep in chunks so CircleCI sees log output during long Z.ai backoff waits."""
+    remaining = max(0.0, float(seconds))
+    while remaining > 0:
+        chunk = min(remaining, 30.0)
+        time.sleep(chunk)
+        remaining -= chunk
+        if remaining > 0:
+            logger.info("%s: %.0fs remaining", label, remaining)
+
+
 def _propagate_with_retry(
     ta: TradingAgentsGraph,
     ticker: str,
@@ -96,9 +107,9 @@ def _propagate_with_retry(
     portfolio_context: str,
 ):
     """Retry full graph run on Z.ai gateway overload (HTTP 529 / code 1305)."""
-    max_attempts = int(os.getenv("PROPAGATE_MAX_ATTEMPTS", "8"))
-    base_delay = float(os.getenv("PROPAGATE_RETRY_DELAY_SEC", "180"))
-    max_delay = float(os.getenv("PROPAGATE_RETRY_MAX_DELAY_SEC", "600"))
+    max_attempts = int(os.getenv("PROPAGATE_MAX_ATTEMPTS", "5"))
+    base_delay = float(os.getenv("PROPAGATE_RETRY_DELAY_SEC", "120"))
+    max_delay = float(os.getenv("PROPAGATE_RETRY_MAX_DELAY_SEC", "300"))
     last_err: Exception | None = None
 
     for attempt in range(max_attempts):
@@ -117,7 +128,7 @@ def _propagate_with_retry(
                 delay,
                 e,
             )
-            time.sleep(delay)
+            _sleep_with_heartbeat(delay, f"propagate backoff {ticker}")
 
     if last_err is not None:
         raise last_err
