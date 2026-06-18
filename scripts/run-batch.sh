@@ -73,8 +73,14 @@ fi
 
 TICKERS="$(IFS=','; echo "${ARR[*]}")"
 
+export LLM_PROVIDER="${LLM_PROVIDER:-***REMOVED***}"
+export LLM_BACKEND_URL="${LLM_BACKEND_URL:-${ANTHROPIC_BASE_URL:-***REMOVED***}}"
+export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-${LLM_BACKEND_URL}}"
+
 echo "=== Batch run ==="
 echo "Current time (IST): $(ist_now)"
+echo "LLM provider: ${LLM_PROVIDER}"
+echo "LLM backend:  ${LLM_BACKEND_URL}"
 echo "Trade date: ${DATE}"
 echo "Source tag: ${SOURCE}"
 echo "Tickers:    ${TICKERS}"

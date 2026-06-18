@@ -34,3 +34,8 @@ if [ "${errors}" -gt 0 ]; then
 fi
 
 echo "Secret checks passed."
+
+mode="${PIPELINE_MODE:-batch}"
+if [ "${mode}" = "batch" ] || [ "${mode}" = "both" ]; then
+  bash scripts/verify-llm.sh
+fi

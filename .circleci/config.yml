@@ -75,6 +75,7 @@ jobs:
       DEEP_THINK_LLM: "glm-5.2"
       QUICK_THINK_LLM: "glm-5.2"
       LLM_BACKEND_URL: "***REMOVED***"
+      ANTHROPIC_BASE_URL: "***REMOVED***"
     steps:
       - checkout
       - export-pipeline-env

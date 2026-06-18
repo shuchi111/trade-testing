@@ -18,7 +18,9 @@ class AnthropicClient(BaseLLMClient):
     def get_llm(self) -> Any:
         llm_kwargs = {"model": self.model}
         if self.base_url:
-            llm_kwargs["base_url"] = self.base_url
+            url = self.base_url.rstrip("/")
+            llm_kwargs["base_url"] = url
+            llm_kwargs["***REMOVED***_api_url"] = url
         if "api_key" in self.kwargs:
             llm_kwargs["api_key"] = self.kwargs["api_key"]
         for key in _PASSTHROUGH_KWARGS:
