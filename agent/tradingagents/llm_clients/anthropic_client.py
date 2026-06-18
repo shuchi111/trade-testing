@@ -1,4 +1,7 @@
 from typing import Any, Optional
+import os
+import time
+
 from langchain_***REMOVED*** import ChatAnthropic
 from .base_client import BaseLLMClient, normalize_content
 from .validators import validate_model
@@ -8,6 +11,9 @@ _PASSTHROUGH_KWARGS = ("timeout", "max_retries", "api_key", "max_tokens", "callb
 
 class NormalizedChatAnthropic(ChatAnthropic):
     def invoke(self, input, config=None, **kwargs):
+        gap = float(os.getenv("LLM_REQUEST_GAP_SEC", "0") or "0")
+        if gap > 0:
+            time.sleep(gap)
         return normalize_content(super().invoke(input, config, **kwargs))
 
 
@@ -26,6 +32,9 @@ class AnthropicClient(BaseLLMClient):
         for key in _PASSTHROUGH_KWARGS:
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
+        # Z.ai 529 overload: fail fast at SDK layer; propagate retry waits minutes between graph runs.
+        if "max_retries" not in llm_kwargs and "api.z.ai" in str(self.base_url or ""):
+            llm_kwargs["max_retries"] = int(os.getenv("LLM_HTTP_MAX_RETRIES", "2"))
         return NormalizedChatAnthropic(**llm_kwargs)
 
     def validate_model(self) -> bool:

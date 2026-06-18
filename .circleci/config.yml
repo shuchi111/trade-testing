@@ -76,12 +76,14 @@ jobs:
       QUICK_THINK_LLM: "glm-5.2"
       LLM_BACKEND_URL: "***REMOVED***"
       ANTHROPIC_BASE_URL: "***REMOVED***"
-      LLM_HTTP_MAX_RETRIES: "10"
-      SHARD_START_DELAY_SEC: "120"
-      BATCH_TICKER_DELAY_SEC: "30"
-      PROPAGATE_MAX_ATTEMPTS: "4"
-      PROPAGATE_RETRY_DELAY_SEC: "60"
-      LLM_PREFLIGHT_MAX_ATTEMPTS: "6"
+      LLM_HTTP_MAX_RETRIES: "2"
+      LLM_REQUEST_GAP_SEC: "8"
+      BATCH_TICKER_DELAY_SEC: "60"
+      PROPAGATE_MAX_ATTEMPTS: "8"
+      PROPAGATE_RETRY_DELAY_SEC: "180"
+      PROPAGATE_RETRY_MAX_DELAY_SEC: "600"
+      LLM_PREFLIGHT_MAX_ATTEMPTS: "10"
+      LLM_PREFLIGHT_STRICT: "0"
     steps:
       - checkout
       - export-pipeline-env
@@ -90,7 +92,7 @@ jobs:
       - install-agent-deps
       - run:
           name: Run batch shard (recommendations only)
-          no_output_timeout: 55m
+          no_output_timeout: 90m
           command: |
             set -euo pipefail
             case "${PIPELINE_MODE}" in
@@ -174,13 +176,17 @@ workflows:
           name: batch-shard-1
           shard_index: 1
           shard_total: 3
+          requires:
+            - batch-shard-0
       - batch-shard:
           name: batch-shard-2
           shard_index: 2
           shard_total: 3
+          requires:
+            - batch-shard-1
       - execute-ai-trades:
           requires:
-            [batch-shard-0, batch-shard-1, batch-shard-2]
+            - batch-shard-2
 
   # "Trigger Pipeline" in CircleCI UI only. Does NOT run on git push.
   manual-ai-recommendations:
@@ -198,6 +204,8 @@ workflows:
           name: batch-shard-1
           shard_index: 1
           shard_total: 3
+          requires:
+            - batch-shard-0
           filters:
             branches:
               only: main
@@ -205,12 +213,14 @@ workflows:
           name: batch-shard-2
           shard_index: 2
           shard_total: 3
+          requires:
+            - batch-shard-1
           filters:
             branches:
               only: main
       - execute-ai-trades:
           requires:
-            [batch-shard-0, batch-shard-1, batch-shard-2]
+            - batch-shard-2
           filters:
             branches:
               only: main

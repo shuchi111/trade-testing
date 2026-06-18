@@ -11,6 +11,7 @@ fi
 provider="${LLM_PROVIDER:-***REMOVED***}"
 backend="${LLM_BACKEND_URL:-${ANTHROPIC_BASE_URL:-***REMOVED***}}"
 backend="${backend%/}"
+strict="${LLM_PREFLIGHT_STRICT:-0}"
 
 if [ "${provider}" != "***REMOVED***" ] || [[ "${backend}" == *"/paas/"* ]]; then
   echo "WARN: LLM_PROVIDER=${provider} backend=${backend}"
@@ -27,7 +28,7 @@ fi
 
 model="${DEEP_THINK_LLM:-glm-5.2}"
 body="$(printf '{"model":"%s","max_tokens":16,"messages":[{"role":"user","content":"Reply with exactly: OK"}]}' "${model}")"
-max_attempts="${LLM_PREFLIGHT_MAX_ATTEMPTS:-6}"
+max_attempts="${LLM_PREFLIGHT_MAX_ATTEMPTS:-10}"
 
 echo "LLM preflight: POST ${url} (provider=${provider}, model=${model})"
 
@@ -35,6 +36,7 @@ response_file="$(mktemp)"
 trap 'rm -f "${response_file}"' EXIT
 
 attempt=0
+last_code=""
 while [ "${attempt}" -lt "${max_attempts}" ]; do
   attempt=$((attempt + 1))
   http_code="$(curl -sS -o "${response_file}" -w "%{http_code}" \
@@ -42,6 +44,7 @@ while [ "${attempt}" -lt "${max_attempts}" ]; do
     -H "Content-Type: application/json" \
     -H "x-api-key: ${api_key}" \
     -d "${body}")"
+  last_code="${http_code}"
 
   if [ "${http_code}" = "200" ]; then
     echo "LLM preflight passed (HTTP ${http_code}, attempt ${attempt})."
@@ -49,7 +52,7 @@ while [ "${attempt}" -lt "${max_attempts}" ]; do
   fi
 
   if [ "${attempt}" -lt "${max_attempts}" ] && { [ "${http_code}" = "529" ] || [ "${http_code}" = "503" ] || [ "${http_code}" = "429" ]; }; then
-    wait_secs=$((20 * attempt))
+    wait_secs=$((30 * attempt))
     echo "WARN: LLM preflight HTTP ${http_code} (Z.ai overloaded) — retry ${attempt}/${max_attempts} in ${wait_secs}s..."
     cat "${response_file}" || true
     echo
@@ -57,8 +60,23 @@ while [ "${attempt}" -lt "${max_attempts}" ]; do
     continue
   fi
 
-  echo "ERROR: LLM preflight failed (HTTP ${http_code}, attempt ${attempt})."
+  break
+done
+
+if [ "${last_code}" = "529" ] || [ "${last_code}" = "503" ] || [ "${last_code}" = "429" ]; then
+  if [ "${strict}" = "1" ]; then
+    echo "ERROR: LLM preflight failed (HTTP ${last_code}) and LLM_PREFLIGHT_STRICT=1."
+    cat "${response_file}" || true
+    echo
+    exit 1
+  fi
+  echo "WARN: LLM preflight still HTTP ${last_code} after ${max_attempts} attempts — continuing batch (529 is often transient)."
   cat "${response_file}" || true
   echo
-  exit 1
-done
+  exit 0
+fi
+
+echo "ERROR: LLM preflight failed (HTTP ${last_code}, attempt ${attempt})."
+cat "${response_file}" || true
+echo
+exit 1

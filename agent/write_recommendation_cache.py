@@ -96,8 +96,9 @@ def _propagate_with_retry(
     portfolio_context: str,
 ):
     """Retry full graph run on Z.ai gateway overload (HTTP 529 / code 1305)."""
-    max_attempts = int(os.getenv("PROPAGATE_MAX_ATTEMPTS", "4"))
-    base_delay = float(os.getenv("PROPAGATE_RETRY_DELAY_SEC", "60"))
+    max_attempts = int(os.getenv("PROPAGATE_MAX_ATTEMPTS", "8"))
+    base_delay = float(os.getenv("PROPAGATE_RETRY_DELAY_SEC", "180"))
+    max_delay = float(os.getenv("PROPAGATE_RETRY_MAX_DELAY_SEC", "600"))
     last_err: Exception | None = None
 
     for attempt in range(max_attempts):
@@ -107,7 +108,7 @@ def _propagate_with_retry(
             last_err = e
             if attempt >= max_attempts - 1 or not is_transient_propagate_error(e):
                 raise
-            delay = base_delay * (2**attempt)
+            delay = min(base_delay * (2**attempt), max_delay)
             logger.warning(
                 "propagate retry %s/%s for %s in %.0fs: %s",
                 attempt + 1,

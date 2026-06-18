@@ -160,9 +160,13 @@ class TradingAgentsGraph:
 
         # Single place for HTTP resilience (``google`` uses the same kwargs keys in ``GoogleClient``).
         if provider in ("***REMOVED***", "glm", "openai", "google", "xai", "openrouter"):
-            # Slow gateways and Windows networks often yield generic "Connection error." without this.
             kwargs["timeout"] = float(os.getenv("LLM_HTTP_TIMEOUT", "300"))
-            kwargs["max_retries"] = int(os.getenv("LLM_HTTP_MAX_RETRIES", "5"))
+            backend = str(self.config.get("backend_url", ""))
+            if provider == "***REMOVED***" and "api.z.ai" in backend:
+                # Z.ai 529: short SDK retries; minutes-long waits happen in propagate retry.
+                kwargs["max_retries"] = int(os.getenv("LLM_HTTP_MAX_RETRIES", "2"))
+            else:
+                kwargs["max_retries"] = int(os.getenv("LLM_HTTP_MAX_RETRIES", "5"))
 
         return kwargs
 
