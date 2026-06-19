@@ -155,7 +155,7 @@ jobs:
             esac
 
 workflows:
-  # Cron only (10:30 IST Mon–Fri = 05:00 UTC). Does NOT run on git push.
+  # Cron only (11:00 IST Mon–Fri = 05:30 UTC). Does NOT run on git push.
   scheduled-ai-recommendations:
     when:
       or:
@@ -163,7 +163,7 @@ workflows:
         - equal: [scheduled_pipeline, << pipeline.trigger_source >>]
     triggers:
       - schedule:
-          cron: "0 5 * * 1-5"
+          cron: "30 5 * * 1-5"
           filters:
             branches:
               only: main

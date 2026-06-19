@@ -175,18 +175,18 @@ API keys (`Z_API_KEY`, `GLM_API_KEY`, etc.) must be set in CircleCI Project Sett
 
 | Item | Value |
 |------|-------|
-| Schedule | Mon–Fri **05:00 UTC** = **10:30 IST** (`0 5 * * 1-5`) |
+| Schedule | Mon–Fri **05:30 UTC** = **11:00 IST** (`30 5 * * 1-5`) |
 | Branch | `main` only (on schedule trigger) |
-| Batch shards | **5** parallel jobs (`shard_total: 5`) |
+| Batch shards | **6** shard jobs (`shard_total: 6`) |
 | Expected tickers | **22** from `RECOMMENDATION_TICKERS` |
 | Python image | `cimg/python:3.12` |
-| Job timeouts | batch **55m**, execute **30m**, price refresh **60m** |
+| Job timeouts | batch **50m**, execute **30m**, price refresh **60m** |
 
 ### When pipelines run (important)
 
 | Trigger | `pipeline.trigger_source` | Workflows that run |
 |---------|---------------------------|-------------------|
-| **Cron schedule** (config `0 5 * * 1-5` UTC) | `schedule` or `scheduled_pipeline` | `scheduled-ai-recommendations` only |
+| **Cron schedule** (config `30 5 * * 1-5` UTC) | `schedule` or `scheduled_pipeline` | `scheduled-ai-recommendations` only |
 | **Trigger Pipeline** (CircleCI UI / API) | `api` | `manual-ai-recommendations` only |
 | **Git push** to `main` | `webhook` | **None** — both workflows have `when` filters that exclude push |
 
