@@ -15,19 +15,19 @@ All trading limits, transaction charges, thesis-break rules, LLM defaults, and C
    - `RECOMMENDATION_TICKERS` (comma-separated, no spaces)
    - `Z_API_KEY` or `GLM_API_KEY` (+ `LLM_PROVIDER=***REMOVED***`, see `env.example`)
 4. Test once: CircleCI → **Pipelines** → **Trigger Pipeline** on `main` (leave `trade_date` empty).
-5. Cron runs automatically **Mon–Fri 11:00 IST** (`30 5 * * 1-5` UTC) — **not on git push**.
+5. CircleCI schedule runs automatically **Mon–Fri 11:30 IST** (`0 6 * * 1-5` UTC) — **not on git push**.
 
 ## When the pipeline runs
 
 | Trigger | Runs batch jobs? | Notes |
 |---------|------------------|-------|
-| Git push to `main` | **No** | Workflows filtered by `pipeline.trigger_source`; push = `webhook` |
-| Cron schedule (11:00 IST weekdays) | **Yes** | `scheduled-ai-recommendations` workflow only |
+| Git push to `main` | **No** | Workflows filtered out; push = `webhook` |
+| CircleCI schedule (11:30 IST weekdays) | **Yes** | Set `run_scheduled=true`; runs `scheduled-ai-recommendations` only |
 | **Trigger Pipeline** in CircleCI UI | **Yes** | `manual-ai-recommendations` workflow only (`api` trigger) |
 
 Push may still create an empty pipeline entry in CircleCI (no jobs). That is expected.
 
-**Cron:** `30 5 * * 1-5` UTC = 11:00 IST, Monday–Friday only. Do not add a second schedule in Project Settings → Triggers unless you want duplicate daily runs.
+**CircleCI schedule:** create one UI schedule on `main` with cron `0 6 * * 1-5` UTC = 11:30 IST, Monday–Friday only. Add pipeline parameter `run_scheduled=true`.
 
 See [thresholds.md](thresholds.md) for full cron and trigger details.
 

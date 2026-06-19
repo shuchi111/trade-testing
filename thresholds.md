@@ -175,7 +175,7 @@ API keys (`Z_API_KEY`, `GLM_API_KEY`, etc.) must be set in CircleCI Project Sett
 
 | Item | Value |
 |------|-------|
-| Schedule | Mon–Fri **05:30 UTC** = **11:00 IST** (`30 5 * * 1-5`) |
+| Schedule | CircleCI UI schedule: Mon–Fri **06:00 UTC** = **11:30 IST** (`0 6 * * 1-5`) |
 | Branch | `main` only (on schedule trigger) |
 | Batch shards | **6** shard jobs (`shard_total: 6`) |
 | Expected tickers | **22** from `RECOMMENDATION_TICKERS` |
@@ -186,7 +186,7 @@ API keys (`Z_API_KEY`, `GLM_API_KEY`, etc.) must be set in CircleCI Project Sett
 
 | Trigger | `pipeline.trigger_source` | Workflows that run |
 |---------|---------------------------|-------------------|
-| **Cron schedule** (config `30 5 * * 1-5` UTC) | `schedule` or `scheduled_pipeline` | `scheduled-ai-recommendations` only |
+| **CircleCI UI schedule** (`0 6 * * 1-5` UTC) | schedule trigger with `run_scheduled=true` | `scheduled-ai-recommendations` only |
 | **Trigger Pipeline** (CircleCI UI / API) | `api` | `manual-ai-recommendations` only |
 | **Git push** to `main` | `webhook` | **None** — both workflows have `when` filters that exclude push |
 
@@ -195,7 +195,7 @@ There is **no** default workflow without a `when` clause, so push does **not** r
 **Verify in CircleCI UI:**
 
 1. **Project Settings → Advanced** — avoid extra “build on push” workflows outside this config.
-2. **Project Settings → Triggers** — if you also created a **schedule trigger** in the UI, you may get **duplicate** daily runs (config cron + UI cron). Use **one** scheduling method, or align both to the same time.
+2. **Project Setup → Schedule trigger** — keep one schedule on `main` with `run_scheduled=true`.
 3. Scheduled run is **Mon–Fri UTC cron** only — no Saturday/Sunday fire (matches NSE weekdays for the cron itself; trade date still rolls Sat/Sun IST to Friday in scripts).
 
 | Runs on git push? | **No** (empty pipeline possible, no jobs) |

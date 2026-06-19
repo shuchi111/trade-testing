@@ -15,6 +15,10 @@ parameters:
     description: Optional YYYY-MM-DD override. Empty = today IST (Sat/Sun → Friday).
     type: string
     default: ""
+  run_scheduled:
+    description: True only for the CircleCI UI schedule trigger.
+    type: boolean
+    default: false
 
 commands:
   verify-secrets:
@@ -155,18 +159,10 @@ jobs:
             esac
 
 workflows:
-  # Cron only (11:00 IST Mon–Fri = 05:30 UTC). Does NOT run on git push.
+  # CircleCI UI schedule only. Configure the UI schedule for 0 6 * * 1-5
+  # and pass run_scheduled=true to run this workflow.
   scheduled-ai-recommendations:
-    when:
-      or:
-        - equal: [schedule, << pipeline.trigger_source >>]
-        - equal: [scheduled_pipeline, << pipeline.trigger_source >>]
-    triggers:
-      - schedule:
-          cron: "30 5 * * 1-5"
-          filters:
-            branches:
-              only: main
+    when: << pipeline.parameters.run_scheduled >>
     jobs:
       - batch-shard:
           name: batch-shard-0
@@ -209,7 +205,9 @@ workflows:
   # "Trigger Pipeline" in CircleCI UI only. Does NOT run on git push.
   manual-ai-recommendations:
     when:
-      equal: [api, << pipeline.trigger_source >>]
+      and:
+        - equal: [api, << pipeline.trigger_source >>]
+        - not: << pipeline.parameters.run_scheduled >>
     jobs:
       - batch-shard:
           name: batch-shard-0
