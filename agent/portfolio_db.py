@@ -7,9 +7,10 @@ from typing import Any
 from trading_constraints import (
     buy_transaction_charge_inr,
     max_position_inr,
-    min_hold_days,
+    min_wallet_cash_reserve_inr,
     sell_transaction_charge_inr,
-    thesis_break_loss_pct,
+    trailing_stop_loss_pct,
+    swing_exit_window_days,
     transaction_charge_for_action,
 )
 
@@ -46,14 +47,74 @@ def load_holding_detail(conn, ticker: str) -> dict[str, Any]:
         )
         row = cur.fetchone()
     if not row:
-        return {"quantity": 0.0, "avg_entry": 0.0, "entry_time": None}
+        return {"quantity": 0.0, "avg_entry": 0.0, "entry_time": None, "holding_since": None}
     entry_time = row[2]
     if isinstance(entry_time, datetime):
         entry_time = entry_time.date()
+    holding_since = current_open_position_since(conn, ticker) or entry_time
     return {
         "quantity": float(row[0] or 0),
         "avg_entry": float(row[1] or 0),
         "entry_time": entry_time,
+        "holding_since": holding_since,
+    }
+
+
+def load_all_holding_details(conn) -> list[dict[str, Any]]:
+    """Return all open holdings with entry dates for portfolio-wide context."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ticker, quantity, avg_entry, entry_time
+                FROM portfolio_holdings
+                WHERE wallet_id = %s AND quantity > 0
+                ORDER BY entry_time ASC, ticker ASC
+                """,
+                (ADMIN_WALLET_ID,),
+            )
+            rows = cur.fetchall()
+    except Exception:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for ticker, qty, avg_entry, entry_time in rows:
+        if isinstance(entry_time, datetime):
+            entry_time = entry_time.date()
+        out.append(
+            {
+                "ticker": str(ticker).upper(),
+                "quantity": float(qty or 0),
+                "avg_entry": float(avg_entry or 0),
+                "entry_time": entry_time,
+                "holding_since": current_open_position_since(conn, str(ticker)),
+            }
+        )
+    return out
+
+
+def load_latest_reference_prices(conn, tickers: list[str]) -> dict[str, float]:
+    """Latest cached reference price per ticker, used only for context estimates."""
+    if not tickers:
+        return {}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (UPPER(ticker)) UPPER(ticker), reference_price
+                FROM ai_recommendation_cache
+                WHERE UPPER(ticker) = ANY(%s) AND reference_price IS NOT NULL
+                ORDER BY UPPER(ticker), computed_at DESC
+                """,
+                ([t.upper() for t in tickers],),
+            )
+            rows = cur.fetchall()
+    except Exception:
+        return {}
+    return {
+        str(ticker).upper(): float(price)
+        for ticker, price in rows
+        if price is not None and float(price) > 0
     }
 
 
@@ -126,6 +187,69 @@ def load_recent_portfolio_trades(conn, ticker: str, limit: int = 5) -> list[dict
     return out
 
 
+def current_open_position_since(conn, ticker: str) -> date | None:
+    """Date when the current uninterrupted open position first became positive."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT action, trade_time, quantity
+                FROM portfolio_trades
+                WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s)
+                ORDER BY trade_time ASC
+                """,
+                (ADMIN_WALLET_ID, ticker),
+            )
+            rows = cur.fetchall()
+    except Exception:
+        return None
+
+    running_qty = 0.0
+    since: date | None = None
+    for action, trade_time, qty in rows:
+        before = running_qty
+        running_qty += float(qty or 0) if str(action).upper() == "BUY" else -float(qty or 0)
+        if before <= 0 and running_qty > 0:
+            since = trade_time.date() if isinstance(trade_time, datetime) else trade_time
+        if running_qty <= 0:
+            since = None
+    return since
+
+
+def load_recent_wallet_trades(conn, limit: int = 10) -> list[dict[str, Any]]:
+    """Recent live paper trades across the whole wallet."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ticker, action, trade_time, quantity, price, total_value, realized_pnl
+                FROM portfolio_trades
+                WHERE wallet_id = %s
+                ORDER BY trade_time DESC
+                LIMIT %s
+                """,
+                (ADMIN_WALLET_ID, limit),
+            )
+            rows = cur.fetchall()
+    except Exception:
+        return []
+    out = []
+    for ticker, action, trade_time, qty, price, total_value, pnl in rows:
+        ts = trade_time.date() if isinstance(trade_time, datetime) else trade_time
+        out.append(
+            {
+                "ticker": str(ticker).upper(),
+                "action": action,
+                "trade_time": ts,
+                "quantity": float(qty or 0),
+                "price": float(price or 0),
+                "total_value": float(total_value or 0),
+                "realized_pnl": None if pnl is None else float(pnl),
+            }
+        )
+    return out
+
+
 def last_live_buy_date(conn, ticker: str) -> date | None:
     """Most recent filled BUY for ticker from live ledger or executions."""
     try:
@@ -163,9 +287,9 @@ def last_live_buy_date(conn, ticker: str) -> date | None:
 
 
 def days_held(conn, ticker: str, as_of: date) -> int | None:
-    """Calendar days since position entry (holdings.entry_time or last BUY)."""
+    """Calendar days since current open holding started; purchase day is day 0."""
     detail = load_holding_detail(conn, ticker)
-    entry = detail.get("entry_time")
+    entry = detail.get("holding_since") or detail.get("entry_time")
     if detail["quantity"] <= 0:
         return None
     if not entry:
@@ -173,6 +297,73 @@ def days_held(conn, ticker: str, as_of: date) -> int | None:
     if not entry:
         return None
     return max(0, (as_of - entry).days)
+
+
+def load_active_trailing_stop(conn, ticker: str) -> dict[str, Any] | None:
+    """Return the active persistent trailing stop for ticker, if present."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, quantity, entry_price, trailing_pct, highest_price, current_stop_price
+                FROM portfolio_trailing_stops
+                WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s) AND status = 'ACTIVE'
+                LIMIT 1
+                """,
+                (ADMIN_WALLET_ID, ticker),
+            )
+            row = cur.fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    return {
+        "id": str(row[0]),
+        "quantity": float(row[1] or 0),
+        "entry_price": float(row[2] or 0),
+        "trailing_pct": float(row[3] or trailing_stop_loss_pct()),
+        "highest_price": float(row[4] or 0),
+        "current_stop_price": float(row[5] or 0),
+    }
+
+
+def evaluate_trailing_stop(conn, ticker: str, current_price: float) -> dict[str, Any] | None:
+    """Update active stop on new highs; return breach details when stop is hit."""
+    stop = load_active_trailing_stop(conn, ticker)
+    if not stop or current_price <= 0:
+        return None
+
+    if current_price <= stop["current_stop_price"]:
+        return {"status": "BREACHED", **stop}
+
+    highest = max(stop["highest_price"], current_price)
+    pct = stop["trailing_pct"] or trailing_stop_loss_pct()
+    next_stop = round(highest * (1 - pct / 100.0), 4)
+    if highest != stop["highest_price"] or next_stop != stop["current_stop_price"]:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE portfolio_trailing_stops
+                   SET highest_price = %s, current_stop_price = %s, updated_at = now()
+                 WHERE id = %s
+                """,
+                (highest, next_stop, stop["id"]),
+            )
+        conn.commit()
+        stop = {**stop, "highest_price": highest, "current_stop_price": next_stop}
+    return {"status": "ACTIVE", **stop}
+
+
+def mark_trailing_stop_triggered(conn, stop_id: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE portfolio_trailing_stops
+               SET status = 'TRIGGERED', closed_at = now(), updated_at = now()
+             WHERE id = %s
+            """,
+            (stop_id,),
+        )
 
 
 def load_recent_ai_recommendations(conn, ticker: str, limit: int = 8) -> list[dict[str, Any]]:
@@ -314,37 +505,95 @@ def build_analysis_context(
     ticker = ticker.strip().upper()
     as_of = datetime.strptime(trade_date, "%Y-%m-%d").date()
     cap = max_position_inr()
-    min_days = min_hold_days()
-    stop_pct = thesis_break_loss_pct()
+    exit_window_days = swing_exit_window_days()
+    trailing_pct = trailing_stop_loss_pct()
 
     detail = load_holding_detail(conn, ticker)
     qty = detail["quantity"]
     avg_entry = detail["avg_entry"]
     cash = load_wallet_cash(conn)
+    all_holdings = load_all_holding_details(conn)
+    all_prices = load_latest_reference_prices(conn, [h["ticker"] for h in all_holdings])
+    if reference_price and reference_price > 0:
+        all_prices[ticker] = reference_price
 
     current_value = qty * reference_price if reference_price and qty > 0 else qty * avg_entry if qty > 0 else 0.0
     room_to_cap = max(0.0, cap - current_value)
     held_days = days_held(conn, ticker, as_of)
 
     lines: list[str] = ["=== LIVE PORTFOLIO ==="]
+    total_cost = 0.0
+    total_mark = 0.0
+    for h in all_holdings:
+        h_cost = h["quantity"] * h["avg_entry"]
+        h_mark_price = all_prices.get(h["ticker"]) or h["avg_entry"]
+        total_cost += h_cost
+        total_mark += h["quantity"] * h_mark_price
+    lines.append(
+        f"Wallet cash: {_fmt_inr(cash)} | Open positions: {len(all_holdings)} | "
+        f"Open cost {_fmt_inr(total_cost)} | Estimated holdings value {_fmt_inr(total_mark)} | "
+        f"Estimated equity {_fmt_inr(cash + total_mark)}"
+    )
+
+    lines.append("")
+    lines.append("=== ALL OPEN HOLDINGS (purchase date and days held) ===")
+    if all_holdings:
+        for h in all_holdings:
+            h_ticker = h["ticker"]
+            h_entry = h.get("holding_since") or h.get("entry_time")
+            h_days = None
+            if h_entry:
+                h_date = h_entry if isinstance(h_entry, date) else None
+                if h_date:
+                    h_days = max(0, (as_of - h_date).days)
+            h_mark_price = all_prices.get(h_ticker) or h["avg_entry"]
+            h_cost = h["quantity"] * h["avg_entry"]
+            h_value = h["quantity"] * h_mark_price
+            h_pnl = h_value - h_cost
+            h_room = max(0.0, cap - h_value)
+            h_stop = load_active_trailing_stop(conn, h_ticker)
+            stop_text = (
+                f", trailing stop {_fmt_inr(h_stop['current_stop_price'])}"
+                if h_stop else ""
+            )
+            entry_text = h_entry.isoformat() if hasattr(h_entry, "isoformat") else "unknown"
+            days_text = f"{h_days} days" if h_days is not None else "days unknown"
+            lines.append(
+                f"{h_ticker}: qty {h['quantity']:.0f}, avg {_fmt_inr(h['avg_entry'])}, "
+                f"purchased {entry_text}, held {days_text}, mark {_fmt_inr(h_mark_price)}, "
+                f"value {_fmt_inr(h_value)}, PnL {_fmt_inr(h_pnl)}, cap room {_fmt_inr(h_room)}{stop_text}"
+            )
+    else:
+        lines.append("No open holdings in wallet.")
+
+    lines.append("")
+    lines.append("=== CURRENT TICKER FOCUS ===")
     if qty > 0 and avg_entry > 0:
         unrealized_pct = None
         if reference_price and avg_entry > 0:
             unrealized_pct = (reference_price - avg_entry) / avg_entry * 100.0
-        entry_str = detail["entry_time"].isoformat() if detail.get("entry_time") else "unknown"
+        entry = detail.get("holding_since") or detail.get("entry_time")
+        entry_str = entry.isoformat() if hasattr(entry, "isoformat") else "unknown"
         hold_str = f"{held_days} days held" if held_days is not None else "hold duration unknown"
         lines.append(
             f"Hold: {qty:.0f} {ticker} @ {_fmt_inr(avg_entry)} "
-            f"(opened {entry_str}, {hold_str}, {min_days}-day minimum hold policy)"
+            f"(opened {entry_str}, {hold_str}, {exit_window_days}-day swing exit window)"
         )
         if unrealized_pct is not None:
             lines.append(f"Unrealized vs entry: {_fmt_pct(unrealized_pct)} at LTP {_fmt_inr(reference_price)}")
+        active_stop = load_active_trailing_stop(conn, ticker)
+        if active_stop:
+            lines.append(
+                f"Active mandatory trailing stop: {active_stop['trailing_pct']:.0f}% trail, "
+                f"highest {_fmt_inr(active_stop['highest_price'])}, "
+                f"stop {_fmt_inr(active_stop['current_stop_price'])}"
+            )
     else:
         lines.append(f"No open position in {ticker}.")
 
     lines.append(
-        f"Wallet cash: {_fmt_inr(cash)} | Per-stock cap: {_fmt_inr(cap)} | "
-        f"Room to add on this name: {_fmt_inr(room_to_cap)} (wallet must never go negative)"
+        f"Per-stock cap: {_fmt_inr(cap)} | Room to add on this name: {_fmt_inr(room_to_cap)} "
+        f"(keep at least {_fmt_inr(min_wallet_cash_reserve_inr())} cash)"
     )
     txn_buy = buy_transaction_charge_inr()
     txn_sell = sell_transaction_charge_inr()
@@ -373,6 +622,19 @@ def build_analysis_context(
             )
     else:
         lines.append("No live paper trades recorded for this ticker.")
+
+    wallet_trades = load_recent_wallet_trades(conn)
+    lines.append("")
+    lines.append("=== RECENT WALLET TRADES (all tickers) ===")
+    if wallet_trades:
+        for t in wallet_trades:
+            pnl_str = "—" if t["realized_pnl"] is None else _fmt_inr(t["realized_pnl"])
+            lines.append(
+                f"{t['trade_time']} {t['ticker']} {t['action']} {t['quantity']:.0f} "
+                f"@ {_fmt_inr(t['price'])} value {_fmt_inr(t['total_value'])} PnL {pnl_str}"
+            )
+    else:
+        lines.append("No wallet-level trade history yet.")
 
     summaries = load_backtest_strategy_summaries(conn, ticker)
     lines.append("")
@@ -423,10 +685,17 @@ def build_analysis_context(
     lines.append("")
     lines.append("=== MANDATORY TRADING RULES (executor enforces these) ===")
     lines.append(f"- Maximum {_fmt_inr(cap)} invested per stock (including adds).")
+    lines.append(
+        f"- Every live BUY has a mandatory {trailing_pct:.0f}% trailing stop; executor sells if LTP breaches it."
+    )
     lines.append("- Wallet cash must never go negative; size buys within available cash.")
     lines.append(
-        f"- After a live BUY, minimum {min_days} calendar days before SELL/UNDERWEIGHT "
-        f"unless unrealized loss reaches about -{stop_pct:.0f}% versus average entry (thesis break)."
+        f"- Aim to harvest the best risk-adjusted exit within {exit_window_days} calendar days, "
+        "using backtests, live trade history, weekly structure, and current profit."
+    )
+    lines.append(
+        f"- The 90-day window is not a forced sell date; SELL/UNDERWEIGHT is allowed earlier "
+        f"when analysis indicates peak profit or thesis-break risk."
     )
     lines.append(
         "- Before recommending SELL, review live trade history and backtest trade dates above; "
@@ -437,28 +706,6 @@ def build_analysis_context(
     )
 
     return "\n".join(lines)
-
-
-def can_sell_under_min_hold(
-    conn,
-    ticker: str,
-    trade_date: str,
-    avg_entry: float,
-    current_price: float,
-) -> tuple[bool, str | None]:
-    """Return (allowed, skip_reason). Allows early exit on thesis-break loss."""
-    as_of = datetime.strptime(trade_date, "%Y-%m-%d").date()
-    held = days_held(conn, ticker, as_of)
-    if held is None:
-        return True, None
-    min_days = min_hold_days()
-    if held >= min_days:
-        return True, None
-    if avg_entry > 0 and current_price > 0:
-        loss_pct = (current_price - avg_entry) / avg_entry * 100.0
-        if loss_pct <= -thesis_break_loss_pct():
-            return True, None
-    return False, "min_hold_period"
 
 
 def _deduct_transaction_charge(conn, *, ticker: str, action: str) -> float:
@@ -542,10 +789,12 @@ def execute_trade(conn, *, ticker: str, action: str, quantity: float, price: flo
         cash = load_wallet_cash(conn)
         cost = quantity * price
         total = cost + charge
-        if total > cash:
+        min_cash = min_wallet_cash_reserve_inr()
+        if total > max(0.0, cash - min_cash):
             raise ValueError(
                 f"Insufficient cash: need {_fmt_inr(total)} "
-                f"(trade {_fmt_inr(cost)} + charge {_fmt_inr(charge)}), have {_fmt_inr(cash)}"
+                f"(trade {_fmt_inr(cost)} + charge {_fmt_inr(charge)}), "
+                f"have {_fmt_inr(cash)} and must keep {_fmt_inr(min_cash)}"
             )
     with conn.cursor() as cur:
         cur.execute(
