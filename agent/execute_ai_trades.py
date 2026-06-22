@@ -36,17 +36,19 @@ from db_url import resolve_psycopg2_url
 from market_date import market_trade_date
 from portfolio_db import (
     ADMIN_WALLET_ID,
-    can_sell_under_min_hold,
     count_open_positions,
+    evaluate_trailing_stop,
     execute_trade,
     load_holding,
     load_wallet_cash,
+    mark_trailing_stop_triggered,
     portfolio_value,
 )
 from recommendation_bucket import is_overweight, recommendation_bucket
 from trading_constraints import (
     buy_transaction_charge_inr,
     max_position_inr,
+    min_wallet_cash_reserve_inr,
     sell_transaction_charge_inr,
 )
 from write_recommendation_cache import fetch_last_close
@@ -211,6 +213,48 @@ def decide_and_execute(
         )
         return {"ok": True, "ticker": ticker, "action_taken": "SKIP", "skip_reason": "no_price"}
 
+    trailing = evaluate_trailing_stop(conn, ticker, price) if hold_qty > 0 else None
+    if trailing and trailing.get("status") == "BREACHED":
+        action = "SELL"
+        qty = hold_qty
+        skip_reason = "trailing_stop_5pct"
+        executed = False
+        pnl = None
+
+        if not settings.get("auto_trade", True) and not force:
+            action, qty, skip_reason = "SKIP", 0.0, "auto_trade_disabled"
+        elif not dry_run:
+            try:
+                net_pnl = execute_trade(conn, ticker=ticker, action="SELL", quantity=qty, price=price)
+                executed = True
+                mark_trailing_stop_triggered(conn, trailing["id"])
+                if net_pnl is not None:
+                    pnl = net_pnl
+                elif avg_entry > 0:
+                    pnl = (price - avg_entry) * qty - sell_transaction_charge_inr()
+            except ValueError as exc:
+                action, qty, skip_reason = "SKIP", 0.0, "insufficient_cash"
+                logger.warning("Trailing stop sell blocked for %s: %s", ticker, exc)
+
+        log_execution(
+            conn, ticker=ticker, trade_date=trade_date, decision=decision,
+            action=action, qty=qty if action == "SELL" else None,
+            price=price if action == "SELL" else None,
+            pnl=pnl, recommendation_id=reco["id"], skip_reason=skip_reason, dry_run=dry_run,
+        )
+        return {
+            "ok": True,
+            "ticker": ticker,
+            "decision": decision,
+            "bucket": bucket,
+            "action_taken": action,
+            "quantity": qty if action == "SELL" else None,
+            "price": price if action == "SELL" else None,
+            "executed": executed,
+            "dry_run": dry_run,
+            "skip_reason": skip_reason,
+        }
+
     cash = load_wallet_cash(conn)
     port_val = portfolio_value(conn, {ticker: price})
     max_pos_pct = settings["max_position_pct"]
@@ -237,7 +281,7 @@ def decide_and_execute(
             action, skip_reason = "SKIP", "insufficient_cash"
         else:
             buy_charge = buy_transaction_charge_inr()
-            cash_for_trade = max(0.0, cash - buy_charge)
+            cash_for_trade = max(0.0, cash - buy_charge - min_wallet_cash_reserve_inr())
             deployable = max(0.0, cash_for_trade - port_val * min_reserve)
             target_value = port_val * max_pos_pct * size_mult
             buy_value = min(deployable, target_value, room_to_cap, cash_for_trade)
@@ -248,8 +292,8 @@ def decide_and_execute(
                 cost = qty * price
                 if qty <= 0:
                     action, skip_reason = "SKIP", "quantity_zero"
-                elif cost + buy_charge > cash:
-                    qty = int((cash - buy_charge) // price)
+                elif cost + buy_charge + min_wallet_cash_reserve_inr() > cash:
+                    qty = int((cash - buy_charge - min_wallet_cash_reserve_inr()) // price)
                     cost = qty * price
                     if qty <= 0:
                         action, skip_reason = "SKIP", "insufficient_cash"
@@ -262,14 +306,8 @@ def decide_and_execute(
         if hold_qty <= 0:
             action, skip_reason = "HOLD", "no_position_to_sell"
         else:
-            allowed, hold_skip = can_sell_under_min_hold(
-                conn, ticker, trade_date, avg_entry, price
-            )
-            if not allowed:
-                action, skip_reason = "SKIP", hold_skip
-            else:
-                action = "SELL"
-                qty = hold_qty
+            action = "SELL"
+            qty = hold_qty
 
     else:
         action = "HOLD"

@@ -107,21 +107,25 @@ Rating: Buy | Overweight | Hold | Underweight | Sell
 Executive summary:
 Action plan: prose for the week (one stance, no scalp churn).
 Entry strategy: prose (add / trim / wait; levels in words if helpful).
-Position sizing: prose (how heavy or light; respect swing and holdings basis).
-Key risk levels: prose (including ~-10% versus basis and thesis-break ideas).
+Position sizing: prose (how heavy or light; respect swing, holdings basis, and the twenty-five thousand INR cap).
+Key risk levels: prose (including the mandatory 5% trailing stop, wallet reserve, and thesis-break ideas).
 Time horizon: prose (multi-week swing; not day-trade framing).
 
 Investment thesis: detailed reasoning in one or more paragraphs anchored in the debate, fundamentals, and market context; explicitly tie to holdings and average entry when provided.
 
-Backtest and live trade review: summarise what the backtest strategy summary, backtest trade dates, and live trade history in portfolio context imply for this week's rating. Cite specific backtest entry/exit dates when warning against whipsaw. State days held versus the ninety-day minimum when recommending any exit.
+Backtest and live trade review: summarise what the backtest strategy summary, backtest trade dates, and live trade history in portfolio context imply for this week's rating. Cite specific backtest entry/exit dates when warning against whipsaw. State days held and where the holding sits inside the ninety-day swing exit window when recommending any exit.
 
 Weekly candles tie-in: how multi-week candle structure supports or contradicts the stance (pattern names in plain words).
 
 GTT target price: INR value and one sentence (tie to >3% gain versus basis when recommending profit-taking).
 
-GTT stop price: INR value and one sentence (tie to about -10% versus basis when describing ordinary risk capacity).
+GTT stop price: INR value and one sentence (use the mandatory 5% trailing stop distance, not a 10% discretionary stop).
 
-When you write the final answer, reproduce the section labels above verbatim (Rating:, Executive summary:, then Action plan:, Entry strategy:, Position sizing:, Key risk levels:, Time horizon:, then Investment thesis:, Backtest and live trade review:, Weekly candles tie-in:, GTT target price:, GTT stop price:) and fill in real content—do not leave the template placeholders.
+Risk/reward ratio: numeric ratio using target reward divided by stop risk (example 1.50).
+
+AI confidence: percentage from 0% to 100% and one short reason.
+
+When you write the final answer, reproduce the section labels above verbatim (Rating:, Executive summary:, then Action plan:, Entry strategy:, Position sizing:, Key risk levels:, Time horizon:, then Investment thesis:, Backtest and live trade review:, Weekly candles tie-in:, GTT target price:, GTT stop price:, Risk/reward ratio:, AI confidence:) and fill in real content—do not leave the template placeholders.
 
 Risk Analysts Debate History:
 {history}

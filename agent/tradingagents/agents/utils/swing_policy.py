@@ -12,10 +12,8 @@ swing** levels, not optimisers:
 * **~3% upside vs basis** before favouring selling *only* to bank small gains — aligns
   with “don’t churn for noise” and typical one–two week expected move on large caps
   before fees matter; too small a band encourages over-trading.
-* **~10% maximum drawdown vs basis** before a **wide protective stop / full exit**
-  is described as ordinary risk capacity — a common discretionary swing band for
-  single-name equity (wider than day-trade stops, tighter than long-term buy-and-hold
-  pain thresholds).
+* **5% trailing stop loss** after entry is mandatory in the executor. The stop moves
+  up with new highs and exits the full paper position when breached.
 
 These defaults are **not** asset-class tuned (e.g. small caps vs Nifty 50); they are
 consistent heuristics across agents and the React GTT preset buttons. Product may
@@ -28,7 +26,7 @@ SWING_DEBATE_REMINDER
 SWING_MARKET_ANALYST_INSTRUCTIONS
     Market analyst system addendum: weekly candles, levels in prose, no Markdown.
 SWING_MANAGERS_BLOCK
-    Block for portfolio manager and trader: weekly mandate, 3%/10% language, GTT lines.
+    Block for portfolio manager and trader: weekly mandate, 3%/5% language, GTT lines.
 
 Not financial advice; research / UI alignment only.
 """
@@ -40,8 +38,9 @@ SWING_DEBATE_REMINDER = (
     "the correct basis (average entry if the investor holds the stock, otherwise the "
     "entry or level you assume for a new position). Short-term red or green is swing "
     "noise unless the weekly thesis breaks. "
-    "After a live BUY, assume a MINIMUM NINETY CALENDAR DAY hold before SELL or UNDERWEIGHT "
-    "unless the thesis breaks (roughly minus ten percent versus average entry). "
+    "After a live BUY, treat NINETY CALENDAR DAYS as the swing exit window: "
+    "look for the best profit-taking exit within that window using strategy history, "
+    "backtests, and weekly structure; do not treat day 90 as an automatic sell. "
     "Maximum twenty-five thousand INR invested per stock. Review live trade history and "
     "backtest trade dates supplied in portfolio context before any exit."
 )
@@ -67,9 +66,9 @@ SWING_MANAGERS_BLOCK = """Swing-trading mandate (respect throughout; do not cont
 
 - Unless there is roughly MORE THAN THREE PERCENT upside versus the investor basis, there is no point recommending a sale purely to bank small gains. If they already hold shares, basis is their average entry unless you explicitly redefine a new basis and explain why.
 
-- Assume maximum tolerable drawdown versus that same basis on the order of MINUS TEN PERCENT before a full protective exit / wide stop is appropriate normal risk management; cite this when you phrase GTT stops.
+- Every live BUY is protected by a mandatory FIVE PERCENT trailing stop loss in the executor. Treat this as a hard risk rule: the stop trails up with new highs and exits the paper position when breached.
 
-- After a live BUY, minimum NINETY CALENDAR DAYS before SELL or UNDERWEIGHT unless thesis breaks (~-10% versus average entry). If portfolio context shows fewer days held, default to Hold unless thesis-break evidence is overwhelming.
+- After a live BUY, NINETY CALENDAR DAYS is the swing exit window, not a forced sell date. Recommend SELL or UNDERWEIGHT within that window when previous analysis, backtests, live trade history, and current structure suggest profit is near its best risk-adjusted point.
 
 - Maximum TWENTY-FIVE THOUSAND INR total invested per stock (including adds). Do not recommend adding if at cap.
 
@@ -77,7 +76,7 @@ SWING_MANAGERS_BLOCK = """Swing-trading mandate (respect throughout; do not cont
 
 - Explicit weekly candlestick reasoning is required (multi-week structure and patterns in words, built from the available OHLC history).
 
-- Always output concrete GTT guidance for Indian cash-style orders: two plain lines beginning with GTT target price and GTT stop price with INR amounts and one short sentence each.
+- Always output concrete GTT guidance for Indian cash-style orders: plain lines beginning with GTT target price, 5% trailing stop price, Risk/reward ratio, and AI confidence with INR amounts / numeric ratio / percentage.
 
 - Do not justify entries or exits using scalp-sized rupee distances; swing outcomes are about larger percent moves and longer patience through normal pullbacks.
 

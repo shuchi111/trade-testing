@@ -4,8 +4,10 @@ from __future__ import annotations
 import os
 
 DEFAULT_MAX_POSITION_INR = 25_000.0
-DEFAULT_MIN_HOLD_DAYS = 90
+DEFAULT_MIN_WALLET_CASH_RESERVE_INR = 5_000.0
+DEFAULT_SWING_EXIT_WINDOW_DAYS = 90
 DEFAULT_THESIS_BREAK_LOSS_PCT = 10.0
+DEFAULT_TRAILING_STOP_LOSS_PCT = 5.0
 
 # Paper transaction charges (INR flat per leg).
 # Indian delivery reality (see plan in README / docs): STT 0.1% on BOTH buy and sell,
@@ -57,12 +59,22 @@ def max_position_inr() -> float:
         return DEFAULT_MAX_POSITION_INR
 
 
-def min_hold_days() -> int:
-    raw = os.getenv("MIN_HOLD_DAYS", str(DEFAULT_MIN_HOLD_DAYS)).strip()
+def min_wallet_cash_reserve_inr() -> float:
+    raw = os.getenv(
+        "MIN_WALLET_CASH_RESERVE_INR", str(DEFAULT_MIN_WALLET_CASH_RESERVE_INR)
+    ).strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return DEFAULT_MIN_WALLET_CASH_RESERVE_INR
+
+
+def swing_exit_window_days() -> int:
+    raw = os.getenv("SWING_EXIT_WINDOW_DAYS", str(DEFAULT_SWING_EXIT_WINDOW_DAYS)).strip()
     try:
         return max(0, int(raw))
     except ValueError:
-        return DEFAULT_MIN_HOLD_DAYS
+        return DEFAULT_SWING_EXIT_WINDOW_DAYS
 
 
 def thesis_break_loss_pct() -> float:
@@ -71,3 +83,13 @@ def thesis_break_loss_pct() -> float:
         return max(0.0, float(raw))
     except ValueError:
         return DEFAULT_THESIS_BREAK_LOSS_PCT
+
+
+def trailing_stop_loss_pct() -> float:
+    raw = os.getenv(
+        "TRAILING_STOP_LOSS_PCT", str(DEFAULT_TRAILING_STOP_LOSS_PCT)
+    ).strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return DEFAULT_TRAILING_STOP_LOSS_PCT
