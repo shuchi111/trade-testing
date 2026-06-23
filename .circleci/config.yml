@@ -35,10 +35,18 @@ commands:
           name: Export pipeline parameters
           command: |
             set -euo pipefail
+            normalize_param() {
+              case "${1:-}" in
+                ""|"empty"|"EMPTY"|"null"|"NULL") printf "" ;;
+                *) printf "%s" "$1" ;;
+              esac
+            }
+            TICKERS_OVERRIDE_VALUE="$(normalize_param '<< pipeline.parameters.tickers_override >>')"
+            TRADE_DATE_VALUE="$(normalize_param '<< pipeline.parameters.trade_date >>')"
             {
               echo "export PIPELINE_MODE='<< pipeline.parameters.mode >>'"
-              echo "export TICKERS_OVERRIDE='<< pipeline.parameters.tickers_override >>'"
-              echo "export TRADE_DATE_INPUT='<< pipeline.parameters.trade_date >>'"
+              echo "export TICKERS_OVERRIDE='${TICKERS_OVERRIDE_VALUE}'"
+              echo "export TRADE_DATE_INPUT='${TRADE_DATE_VALUE}'"
               echo "export REPO_ROOT='${PWD}'"
             } >> "$BASH_ENV"
 

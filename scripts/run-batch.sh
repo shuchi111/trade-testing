@@ -14,6 +14,16 @@ override="${TICKERS_OVERRIDE:-}"
 trade_date_input="${TRADE_DATE_INPUT:-}"
 recommendation_tickers="${RECOMMENDATION_TICKERS:-}"
 
+normalize_empty() {
+  case "${1:-}" in
+    ""|"empty"|"EMPTY"|"null"|"NULL") printf "" ;;
+    *) printf "%s" "$1" ;;
+  esac
+}
+
+override="$(normalize_empty "${override}")"
+trade_date_input="$(normalize_empty "${trade_date_input}")"
+
 if [ -n "${override}" ]; then
   TICKERS="${override}"
   SOURCE="circleci_manual"

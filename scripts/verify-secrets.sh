@@ -17,6 +17,10 @@ mode="${PIPELINE_MODE:-batch}"
 override="${TICKERS_OVERRIDE:-}"
 tickers_secret="${RECOMMENDATION_TICKERS:-}"
 
+case "${override}" in
+  "empty"|"EMPTY"|"null"|"NULL") override="" ;;
+esac
+
 if [ "${mode}" = "batch" ] || [ "${mode}" = "both" ]; then
   if [ -z "${override}" ] && [ -z "${tickers_secret}" ]; then
     echo "ERROR: Set RECOMMENDATION_TICKERS (all 22 — see tickers.example.txt)."
