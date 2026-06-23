@@ -2,7 +2,8 @@
 Run TradingAgents propagate for one ticker and upsert into PostgreSQL (Supabase).
 
 Stores ``reference_price`` as the latest split-adjusted close from yfinance when
-available (else raw close); keep fetch_last_close in sync for refresh compares.
+available (else raw close); scheduled runs fail if no real price is available.
+Keep fetch_last_close in sync for refresh compares.
 
 Used locally and from GitHub Actions. Requires DATABASE_URL and one of:
 Z_API_KEY, GLM_API_KEY, or ANTHROPIC_AUTH_TOKEN (with LLM_BACKEND_URL or ANTHROPIC_BASE_URL).
@@ -19,6 +20,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -50,6 +52,8 @@ logger = logging.getLogger("write_recommendation_cache")
 
 
 _ZAI_ANTHROPIC_URL = "***REMOVED***"
+DEFAULT_TRAILING_STOP_PCT = 5.0
+DEFAULT_MIN_RISK_REWARD = 1.5
 
 
 def _build_config() -> dict:
@@ -177,17 +181,68 @@ def _portfolio_context(
             reference_price=reference_price,
         )
     except Exception as exc:
-        logger.warning("build_analysis_context failed for %s: %s", ticker, exc)
-        if holding_qty > 0 and holding_entry > 0:
-            return (
-                f"You currently hold {holding_qty:.0f} units of {ticker} "
-                f"at an average entry price of {holding_entry:,.2f}. "
-                "Use this average entry as the percentage basis for swing framing."
-            )
-        return (
-            f"Portfolio tracker: no quantity held reported for {ticker}. "
-            "Use fundamentals and risk only."
-        )
+        try:
+            conn.rollback()
+        except Exception as rollback_err:
+            logger.error("Rollback failed after context error for %s: %s", ticker, rollback_err)
+        raise RuntimeError(f"Real portfolio context unavailable for {ticker}: {exc}") from exc
+
+
+def _first_number_match(text: str, patterns: list[str]) -> float | None:
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        try:
+            return float(match.group(1).replace(",", ""))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _extract_signal_metrics(
+    decision: str,
+    final_trade_decision: str,
+    reference_price: float | None,
+) -> dict[str, float | str | None]:
+    text = f"{decision or ''}\n{final_trade_decision or ''}"
+    action = recommendation_bucket(decision).upper()
+    entry = reference_price if reference_price and reference_price > 0 else None
+    target = _first_number_match(
+        text,
+        [r"\b(?:target|take\s*profit|tp)\s*(?:price)?\s*[:=@-]?\s*(?:₹|rs\.?|inr)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)"],
+    )
+    stop = _first_number_match(
+        text,
+        [r"\b(?:stop\s*loss|stoploss|stop|sl)\s*(?:price)?\s*[:=@-]?\s*(?:₹|rs\.?|inr)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)"],
+    )
+    confidence = _first_number_match(
+        text,
+        [
+            r"\b(?:confidence|probability|conviction)\s*[:=@-]?\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*%",
+            r"\b([0-9]{1,3}(?:\.[0-9]+)?)\s*%\s*(?:confidence|probability|conviction)\b",
+        ],
+    )
+
+    if entry is not None and stop is None:
+        stop = entry * (1 - DEFAULT_TRAILING_STOP_PCT / 100.0)
+    risk = max(0.0, entry - stop) if entry is not None and stop is not None else None
+    if entry is not None and target is None and action == "BUY" and risk and risk > 0:
+        target = entry + risk * DEFAULT_MIN_RISK_REWARD
+    reward = max(0.0, target - entry) if entry is not None and target is not None else None
+    risk_reward = reward / risk if risk and risk > 0 and reward is not None else None
+    if confidence is not None and not (0 <= confidence <= 100):
+        confidence = None
+
+    return {
+        "signal_action": action,
+        "target_price": target,
+        "stop_loss_price": stop,
+        "risk_amount": risk,
+        "reward_amount": reward,
+        "risk_reward_ratio": risk_reward,
+        "ai_confidence_pct": confidence,
+    }
 
 
 def upsert_cache_row(
@@ -228,12 +283,15 @@ def upsert_cache_row(
     source : str
         Provenance tag (e.g. ``"github_action"``).
     """
+    metrics = _extract_signal_metrics(decision, final_trade_decision, reference_price)
     sql = """
     INSERT INTO ai_recommendation_cache (
       ticker, trade_date, decision, final_trade_decision, reference_price,
+      signal_action, target_price, stop_loss_price, risk_amount, reward_amount,
+      risk_reward_ratio, ai_confidence_pct,
       holding_quantity, holding_avg_entry, source, computed_at
     )
-    VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, now());
+    VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now());
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -244,6 +302,13 @@ def upsert_cache_row(
                 decision or "",
                 final_trade_decision or "",
                 reference_price,
+                metrics["signal_action"],
+                metrics["target_price"],
+                metrics["stop_loss_price"],
+                metrics["risk_amount"],
+                metrics["reward_amount"],
+                metrics["risk_reward_ratio"],
+                metrics["ai_confidence_pct"],
                 holding_quantity,
                 holding_avg_entry,
                 source,
@@ -285,12 +350,15 @@ def _insert_history(
     source: str,
 ) -> None:
     bucket = recommendation_bucket(decision)
+    metrics = _extract_signal_metrics(decision, final_trade_decision, reference_price)
     sql = """
     INSERT INTO ai_recommendation_history (
       ticker, trade_date, decision, final_trade_decision, bucket,
-      reference_price, holding_quantity, holding_avg_entry, source, computed_at
+      reference_price, signal_action, target_price, stop_loss_price, risk_amount,
+      reward_amount, risk_reward_ratio, ai_confidence_pct,
+      holding_quantity, holding_avg_entry, source, computed_at
     )
-    VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, now())
+    VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
     ON CONFLICT (ticker, trade_date, decision) DO NOTHING;
     """
     with conn.cursor() as cur:
@@ -303,6 +371,13 @@ def _insert_history(
                 final_trade_decision or "",
                 bucket,
                 reference_price,
+                metrics["signal_action"],
+                metrics["target_price"],
+                metrics["stop_loss_price"],
+                metrics["risk_amount"],
+                metrics["reward_amount"],
+                metrics["risk_reward_ratio"],
+                metrics["ai_confidence_pct"],
                 holding_quantity,
                 holding_avg_entry,
                 source,
@@ -385,6 +460,13 @@ def run_single_recommendation(
         return {"ok": False, "error": "holding_quantity and holding_avg_entry must be >= 0", "ticker": ticker}
 
     reference_price = fetch_last_close(ticker)
+    if reference_price is None:
+        return {
+            "ok": False,
+            "error": "Real market reference price unavailable from yfinance",
+            "ticker": ticker,
+            "trade_date": trade_date,
+        }
 
     owns_conn = db_conn is None
     conn = psycopg2.connect(db_url) if owns_conn else db_conn
@@ -397,6 +479,9 @@ def run_single_recommendation(
             holding_avg_entry,
             reference_price=reference_price,
         )
+        # Optional context queries may fall back after SQL errors; clear psycopg2's
+        # transaction state before the LLM call and final recommendation writes.
+        conn.rollback()
 
         try:
             ta = TradingAgentsGraph(debug=debug, config=cfg)

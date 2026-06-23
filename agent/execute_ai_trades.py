@@ -101,24 +101,6 @@ def latest_recommendation(conn, ticker: str, trade_date: str) -> dict | None:
             (ticker, trade_date),
         )
         row = cur.fetchone()
-        if row:
-            return {
-                "id": str(row[0]),
-                "decision": row[1] or "",
-                "final_trade_decision": row[2] or "",
-                "reference_price": float(row[3]) if row[3] is not None else None,
-            }
-        cur.execute(
-            """
-            SELECT id, decision, final_trade_decision, reference_price, computed_at
-            FROM ai_recommendation_cache
-            WHERE UPPER(ticker) = UPPER(%s)
-            ORDER BY computed_at DESC
-            LIMIT 1
-            """,
-            (ticker,),
-        )
-        row = cur.fetchone()
     if not row:
         return None
     return {

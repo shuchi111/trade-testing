@@ -1,6 +1,7 @@
 """Paper wallet helpers for AI recommendation + execution pipelines."""
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime
 from typing import Any
 
@@ -15,6 +16,17 @@ from trading_constraints import (
 )
 
 ADMIN_WALLET_ID = "00000000-0000-0000-0000-000000000001"
+logger = logging.getLogger(__name__)
+
+
+def _rollback_after_optional_query_error(conn, label: str, exc: Exception) -> None:
+    """Clear psycopg2's aborted transaction state after a fallback query fails."""
+    try:
+        conn.rollback()
+    except Exception as rollback_err:
+        logger.warning("%s failed: %s; rollback failed: %s", label, exc, rollback_err)
+        return
+    logger.warning("%s failed: %s", label, exc)
 
 
 def load_holding(conn, ticker: str) -> tuple[float, float]:
@@ -74,7 +86,8 @@ def load_all_holding_details(conn) -> list[dict[str, Any]]:
                 (ADMIN_WALLET_ID,),
             )
             rows = cur.fetchall()
-    except Exception:
+    except Exception as exc:
+        _rollback_after_optional_query_error(conn, "load_all_holding_details", exc)
         return []
 
     out: list[dict[str, Any]] = []
@@ -109,7 +122,8 @@ def load_latest_reference_prices(conn, tickers: list[str]) -> dict[str, float]:
                 ([t.upper() for t in tickers],),
             )
             rows = cur.fetchall()
-    except Exception:
+    except Exception as exc:
+        _rollback_after_optional_query_error(conn, "load_latest_reference_prices", exc)
         return {}
     return {
         str(ticker).upper(): float(price)
@@ -169,7 +183,8 @@ def load_recent_portfolio_trades(conn, ticker: str, limit: int = 5) -> list[dict
                 (ADMIN_WALLET_ID, ticker, limit),
             )
             rows = cur.fetchall()
-    except Exception:
+    except Exception as exc:
+        _rollback_after_optional_query_error(conn, "load_recent_portfolio_trades", exc)
         return []
     out = []
     for action, trade_time, qty, price, total_value, pnl in rows:
@@ -201,7 +216,8 @@ def current_open_position_since(conn, ticker: str) -> date | None:
                 (ADMIN_WALLET_ID, ticker),
             )
             rows = cur.fetchall()
-    except Exception:
+    except Exception as exc:
+        _rollback_after_optional_query_error(conn, "current_open_position_since", exc)
         return None
 
     running_qty = 0.0
@@ -231,7 +247,8 @@ def load_recent_wallet_trades(conn, limit: int = 10) -> list[dict[str, Any]]:
                 (ADMIN_WALLET_ID, limit),
             )
             rows = cur.fetchall()
-    except Exception:
+    except Exception as exc:
+        _rollback_after_optional_query_error(conn, "load_recent_wallet_trades", exc)
         return []
     out = []
     for ticker, action, trade_time, qty, price, total_value, pnl in rows:
@@ -266,8 +283,8 @@ def last_live_buy_date(conn, ticker: str) -> date | None:
             if row and row[0]:
                 ts = row[0]
                 return ts.date() if isinstance(ts, datetime) else ts
-    except Exception:
-        pass
+    except Exception as exc:
+        _rollback_after_optional_query_error(conn, "last_live_buy_date.portfolio_trades", exc)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -281,8 +298,8 @@ def last_live_buy_date(conn, ticker: str) -> date | None:
             row = cur.fetchone()
             if row and row[0]:
                 return row[0]
-    except Exception:
-        pass
+    except Exception as exc:
+        _rollback_after_optional_query_error(conn, "last_live_buy_date.ai_trade_executions", exc)
     return None
 
 
@@ -313,7 +330,8 @@ def load_active_trailing_stop(conn, ticker: str) -> dict[str, Any] | None:
                 (ADMIN_WALLET_ID, ticker),
             )
             row = cur.fetchone()
-    except Exception:
+    except Exception as exc:
+        _rollback_after_optional_query_error(conn, "load_active_trailing_stop", exc)
         return None
     if not row:
         return None
@@ -380,7 +398,8 @@ def load_recent_ai_recommendations(conn, ticker: str, limit: int = 8) -> list[di
                 (ticker, limit),
             )
             rows = cur.fetchall()
-    except Exception:
+    except Exception as exc:
+        _rollback_after_optional_query_error(conn, "load_recent_ai_recommendations", exc)
         return []
     return [
         {
@@ -409,7 +428,8 @@ def load_backtest_strategy_summaries(conn, ticker: str, limit: int = 8) -> list[
                 (ticker,),
             )
             rows = cur.fetchall()
-    except Exception:
+    except Exception as exc:
+        _rollback_after_optional_query_error(conn, "load_backtest_strategy_summaries", exc)
         return []
     out = []
     for row in rows[:limit]:
@@ -463,7 +483,8 @@ def load_backtest_trades(
                     (ticker, limit),
                 )
             rows = cur.fetchall()
-    except Exception:
+    except Exception as exc:
+        _rollback_after_optional_query_error(conn, "load_backtest_trades", exc)
         return []
     return [
         {
@@ -521,7 +542,12 @@ def build_analysis_context(
     room_to_cap = max(0.0, cap - current_value)
     held_days = days_held(conn, ticker, as_of)
 
-    lines: list[str] = ["=== LIVE PORTFOLIO ==="]
+    lines: list[str] = [
+        "=== WEBSITE CONTEXT COVERAGE ===",
+        "Use every section below as if reviewing the website tabs before deciding: wallet, holdings, holding dates, live trades, backtests, prior AI history, active stops, and mandatory rules.",
+        "",
+        "=== LIVE PORTFOLIO ===",
+    ]
     total_cost = 0.0
     total_mark = 0.0
     for h in all_holdings:
