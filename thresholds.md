@@ -88,6 +88,14 @@ Same numbers are repeated in LLM prompts (`agent/tradingagents/agents/utils/swin
 
 Buys are skipped when `room_to_cap` &lt; one share price (`max_position_cap_reached`).
 
+### Hard wallet reserve (`MIN_WALLET_CASH_RESERVE_INR`)
+
+| Default | Env |
+|---------|-----|
+| **₹5,000** cash must remain after any BUY | `MIN_WALLET_CASH_RESERVE_INR` |
+
+This is an absolute floor. It is enforced in addition to the percentage reserve below.
+
 ### Executor settings (`ai_trading_settings`)
 
 Fixed row id: `00000000-0000-0000-0000-000000000002`.
@@ -100,9 +108,9 @@ If the row is **missing**, code fallbacks in `execute_ai_trades.py`:
 | `dry_run` | `false` | Actually write to DB |
 | `max_position_pct` | **0.15** (15%) | Max % of portfolio value per new/add position |
 | `max_positions` | **5** | Max distinct open holdings |
-| `min_cash_reserve_pct` | **0.20** (20%) | Keep this % of portfolio in cash |
+| `min_cash_reserve_pct` | **0.20** (20%) | Keep this % of portfolio in cash, after respecting the hard ₹5k floor |
 
-Buy sizing: `deployable = cash_for_trade − portfolio_value × min_cash_reserve_pct`, capped by `max_position_pct`, `MAX_POSITION_INR`, and available cash.
+Buy sizing: `cash_for_trade = cash − buy_charge − MIN_WALLET_CASH_RESERVE_INR`; `deployable = cash_for_trade − portfolio_value × min_cash_reserve_pct`, capped by `max_position_pct`, `MAX_POSITION_INR`, and available cash.
 
 ### Prompt heuristics (not env — `swing_policy.py`)
 

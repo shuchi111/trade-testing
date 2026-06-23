@@ -243,6 +243,7 @@ def decide_and_execute(
     min_reserve = settings["min_cash_reserve_pct"]
     max_positions = settings["max_positions"]
     max_inr = settings.get("max_position_inr") or max_position_inr()
+    min_cash_inr = min_wallet_cash_reserve_inr()
 
     action = "HOLD"
     qty = 0.0
@@ -263,26 +264,29 @@ def decide_and_execute(
             action, skip_reason = "SKIP", "insufficient_cash"
         else:
             buy_charge = buy_transaction_charge_inr()
-            cash_for_trade = max(0.0, cash - buy_charge - min_wallet_cash_reserve_inr())
-            deployable = max(0.0, cash_for_trade - port_val * min_reserve)
-            target_value = port_val * max_pos_pct * size_mult
-            buy_value = min(deployable, target_value, room_to_cap, cash_for_trade)
-            if buy_value < price:
+            if cash <= buy_charge + min_cash_inr:
                 action, skip_reason = "SKIP", "insufficient_cash"
             else:
-                qty = int(buy_value // price)
-                cost = qty * price
-                if qty <= 0:
-                    action, skip_reason = "SKIP", "quantity_zero"
-                elif cost + buy_charge + min_wallet_cash_reserve_inr() > cash:
-                    qty = int((cash - buy_charge - min_wallet_cash_reserve_inr()) // price)
+                cash_for_trade = max(0.0, cash - buy_charge - min_cash_inr)
+                deployable = max(0.0, cash_for_trade - port_val * min_reserve)
+                target_value = port_val * max_pos_pct * size_mult
+                buy_value = min(deployable, target_value, room_to_cap, cash_for_trade)
+                if buy_value < price:
+                    action, skip_reason = "SKIP", "insufficient_cash"
+                else:
+                    qty = int(buy_value // price)
                     cost = qty * price
                     if qty <= 0:
-                        action, skip_reason = "SKIP", "insufficient_cash"
+                        action, skip_reason = "SKIP", "quantity_zero"
+                    elif cost + buy_charge + min_cash_inr > cash:
+                        qty = int((cash - buy_charge - min_cash_inr) // price)
+                        cost = qty * price
+                        if qty <= 0:
+                            action, skip_reason = "SKIP", "insufficient_cash"
+                        else:
+                            action = "BUY"
                     else:
                         action = "BUY"
-                else:
-                    action = "BUY"
 
     elif bucket == "sell":
         if hold_qty <= 0:
