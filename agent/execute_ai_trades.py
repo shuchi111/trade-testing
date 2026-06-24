@@ -36,13 +36,11 @@ from db_url import resolve_psycopg2_url
 from market_date import market_trade_date
 from portfolio_db import (
     ADMIN_WALLET_ID,
-    count_open_positions,
     evaluate_trailing_stop,
     execute_trade,
     load_holding,
     load_wallet_cash,
     mark_trailing_stop_triggered,
-    portfolio_value,
 )
 from recommendation_bucket import is_overweight, recommendation_bucket
 from trading_constraints import (
@@ -62,7 +60,7 @@ def load_settings(conn) -> dict:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT auto_trade, dry_run, max_position_pct, max_positions, min_cash_reserve_pct
+            SELECT auto_trade, dry_run
             FROM ai_trading_settings WHERE id = %s
             """,
             (SETTINGS_ID,),
@@ -72,17 +70,11 @@ def load_settings(conn) -> dict:
         base = {
             "auto_trade": True,
             "dry_run": False,
-            "max_position_pct": 0.15,
-            "max_positions": 5,
-            "min_cash_reserve_pct": 0.20,
         }
     else:
         base = {
             "auto_trade": bool(row[0]),
             "dry_run": bool(row[1]),
-            "max_position_pct": float(row[2]),
-            "max_positions": int(row[3]),
-            "min_cash_reserve_pct": float(row[4]),
         }
     base["max_position_inr"] = max_position_inr()
     return base
@@ -238,10 +230,6 @@ def decide_and_execute(
         }
 
     cash = load_wallet_cash(conn)
-    port_val = portfolio_value(conn, {ticker: price})
-    max_pos_pct = settings["max_position_pct"]
-    min_reserve = settings["min_cash_reserve_pct"]
-    max_positions = settings["max_positions"]
     max_inr = settings.get("max_position_inr") or max_position_inr()
     min_cash_inr = min_wallet_cash_reserve_inr()
 
@@ -258,8 +246,6 @@ def decide_and_execute(
             action, skip_reason = "SKIP", "already_holding_no_overweight"
         elif room_to_cap < price:
             action, skip_reason = "SKIP", "max_position_cap_reached"
-        elif count_open_positions(conn) >= max_positions and hold_qty <= 0:
-            action, skip_reason = "SKIP", "max_positions_reached"
         elif cash <= 0:
             action, skip_reason = "SKIP", "insufficient_cash"
         else:
@@ -268,9 +254,7 @@ def decide_and_execute(
                 action, skip_reason = "SKIP", "insufficient_cash"
             else:
                 cash_for_trade = max(0.0, cash - buy_charge - min_cash_inr)
-                deployable = max(0.0, cash_for_trade - port_val * min_reserve)
-                target_value = port_val * max_pos_pct * size_mult
-                buy_value = min(deployable, target_value, room_to_cap, cash_for_trade)
+                buy_value = min(cash_for_trade, room_to_cap)
                 if buy_value < price:
                     action, skip_reason = "SKIP", "insufficient_cash"
                 else:

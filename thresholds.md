@@ -13,9 +13,7 @@ Reference for every rule, limit, and default in this repo. Most trading values c
 | **Max invested per stock** | ₹25,000 | `MAX_POSITION_INR` | not set |
 | **Min hold before sell** | 90 calendar days | `MIN_HOLD_DAYS` | not set |
 | **Thesis-break loss** | 10% down vs entry | `THESIS_BREAK_LOSS_PCT` | not set |
-| **Max position % of portfolio** | 15% | DB: `ai_trading_settings.max_position_pct` | — |
-| **Max open positions** | 5 | DB: `ai_trading_settings.max_positions` | — |
-| **Min cash reserve** | 20% of portfolio | DB: `ai_trading_settings.min_cash_reserve_pct` | — |
+| **Hard cash reserve** | ₹5,000 | `MIN_WALLET_CASH_RESERVE_INR` | `5000` |
 | **Stale price refresh band** | ±3% | `PRICE_REFRESH_RATIO` | `0.03` |
 | **Max cache age (refresh)** | 10 days | `MAX_CACHE_AGE_DAYS` | `10` |
 
@@ -94,7 +92,7 @@ Buys are skipped when `room_to_cap` &lt; one share price (`max_position_cap_reac
 |---------|-----|
 | **₹5,000** cash must remain after any BUY | `MIN_WALLET_CASH_RESERVE_INR` |
 
-This is an absolute floor. It is enforced in addition to the percentage reserve below.
+This is the only cash reserve used for cron BUY sizing.
 
 ### Executor settings (`ai_trading_settings`)
 
@@ -106,11 +104,11 @@ If the row is **missing**, code fallbacks in `execute_ai_trades.py`:
 |-------|----------|---------|
 | `auto_trade` | `true` | Execute paper trades |
 | `dry_run` | `false` | Actually write to DB |
-| `max_position_pct` | **0.15** (15%) | Max % of portfolio value per new/add position |
-| `max_positions` | **5** | Max distinct open holdings |
-| `min_cash_reserve_pct` | **0.20** (20%) | Keep this % of portfolio in cash, after respecting the hard ₹5k floor |
+| `max_position_pct` | **1.00** | Legacy field; buy sizing is capped by `MAX_POSITION_INR` instead |
+| `max_positions` | ignored | Legacy field; cron does not limit number of holdings |
+| `min_cash_reserve_pct` | **0.00** | Legacy field; hard ₹5k wallet reserve is used instead |
 
-Buy sizing: `cash_for_trade = cash − buy_charge − MIN_WALLET_CASH_RESERVE_INR`; `deployable = cash_for_trade − portfolio_value × min_cash_reserve_pct`, capped by `max_position_pct`, `MAX_POSITION_INR`, and available cash.
+Buy sizing: `cash_for_trade = cash − buy_charge − MIN_WALLET_CASH_RESERVE_INR`, capped by `MAX_POSITION_INR` and available cash.
 
 ### Prompt heuristics (not env — `swing_policy.py`)
 
@@ -255,7 +253,6 @@ When a trade does not run (or is not attempted), `ai_trade_executions.skip_reaso
 | `no_price` | SKIP | Could not resolve a trade price |
 | `already_holding_no_overweight` | SKIP | BUY but already hold; decision not Overweight |
 | `max_position_cap_reached` | SKIP | At ₹25k (or `MAX_POSITION_INR`) cap |
-| `max_positions_reached` | SKIP | Already at max open positions (DB or fallback 5) |
 | `insufficient_cash` | SKIP | Cash too low (includes buy charge if set) |
 | `quantity_zero` | SKIP | Sized to 0 shares |
 | `no_position_to_sell` | **HOLD** | SELL signal but no open position |
