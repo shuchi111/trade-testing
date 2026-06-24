@@ -176,29 +176,34 @@ workflows:
           name: batch-shard-1
           shard_index: 1
           shard_total: 6
+          requires:
+            - batch-shard-0
       - batch-shard:
           name: batch-shard-2
           shard_index: 2
           shard_total: 6
+          requires:
+            - batch-shard-1
       - batch-shard:
           name: batch-shard-3
           shard_index: 3
           shard_total: 6
+          requires:
+            - batch-shard-2
       - batch-shard:
           name: batch-shard-4
           shard_index: 4
           shard_total: 6
+          requires:
+            - batch-shard-3
       - batch-shard:
           name: batch-shard-5
           shard_index: 5
           shard_total: 6
+          requires:
+            - batch-shard-4
       - execute-ai-trades:
           requires:
-            - batch-shard-0
-            - batch-shard-1
-            - batch-shard-2
-            - batch-shard-3
-            - batch-shard-4
             - batch-shard-5
 
   # "Trigger Pipeline" in CircleCI UI only. Does NOT run on git push.
@@ -217,6 +222,8 @@ workflows:
           name: batch-shard-1
           shard_index: 1
           shard_total: 6
+          requires:
+            - batch-shard-0
           filters:
             branches:
               only: main
@@ -224,6 +231,8 @@ workflows:
           name: batch-shard-2
           shard_index: 2
           shard_total: 6
+          requires:
+            - batch-shard-1
           filters:
             branches:
               only: main
@@ -231,6 +240,8 @@ workflows:
           name: batch-shard-3
           shard_index: 3
           shard_total: 6
+          requires:
+            - batch-shard-2
           filters:
             branches:
               only: main
@@ -238,6 +249,8 @@ workflows:
           name: batch-shard-4
           shard_index: 4
           shard_total: 6
+          requires:
+            - batch-shard-3
           filters:
             branches:
               only: main
@@ -245,16 +258,13 @@ workflows:
           name: batch-shard-5
           shard_index: 5
           shard_total: 6
+          requires:
+            - batch-shard-4
           filters:
             branches:
               only: main
       - execute-ai-trades:
           requires:
-            - batch-shard-0
-            - batch-shard-1
-            - batch-shard-2
-            - batch-shard-3
-            - batch-shard-4
             - batch-shard-5
           filters:
             branches:
