@@ -1,0 +1,238 @@
+# Daily full-batch AI recommendation pipeline + on-demand price refresh.
+
+
+name: AI recommendations (cache)
+
+on:
+  schedule:
+    - cron: '0 6 * * 1-5' # Weekdays 11:30 AM IST (6:00 AM UTC) — full batch: all tickers
+  repository_dispatch:
+    types: [ai-recommendation]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: batch = all tickers | price_refresh = stale rows only | both
+        type: choice
+        required: false
+        default: batch
+        options:
+          - batch
+          - price_refresh
+          - both
+      tickers_override:
+        description: (batch only) comma-separated tickers — overrides RECOMMENDATION_TICKERS
+        required: false
+        type: string
+      trade_date:
+        description: (batch only) YYYY-MM-DD — empty = UTC today
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+  PRICE_REFRESH_RATIO: '0.03'
+  MAX_CACHE_AGE_DAYS: '10'
+
+jobs:
+  batch:
+    name: Batch (write cache)
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    concurrency:
+      group: ai-recommendations-batch-${{ github.repository }}
+      cancel-in-progress: false
+    if: (github.event_name == 'schedule') || (github.event_name == 'repository_dispatch' && github.event.action == 'ai-recommendation') || (github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'batch' || github.event.inputs.mode == 'both' || github.event.inputs.mode == ''))
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Verify DATABASE_URL secret
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo '::error::Repository secret DATABASE_URL is empty.'
+            exit 1
+          fi
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Verify LLM API key
+        run: |
+          if [ -z "$A_TOKEN" ] && [ -z "$Z_KEY" ] && [ -z "$G_KEY" ]; then
+            echo '::error::Set ANTHROPIC_AUTH_TOKEN (recommended, same as PR review) or Z_API_KEY or GLM_API_KEY.'
+            exit 1
+          fi
+        env:
+          A_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          Z_KEY: ${{ secrets.Z_API_KEY }}
+          G_KEY: ${{ secrets.GLM_API_KEY }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: agent/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r agent/requirements.txt
+
+      - name: Run recommendation for each ticker
+        id: batch
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          Z_API_KEY: ${{ secrets.Z_API_KEY }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          LLM_BACKEND_URL: ${{ secrets.LLM_BACKEND_URL }}
+          TICKERS_OVERRIDE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tickers_override || '' }}
+          TRADE_DATE_INPUT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.trade_date || '' }}
+          RECOMMENDATION_TICKERS: ${{ secrets.RECOMMENDATION_TICKERS }}
+          DISPATCH_TICKER: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.ticker || '' }}
+          DISPATCH_TRADE_DATE: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.trade_date || '' }}
+        run: |
+          set -uo pipefail
+
+          if [ '${{ github.event_name }}' = 'repository_dispatch' ]; then
+            TICKERS="$DISPATCH_TICKER"
+            DATE="$DISPATCH_TRADE_DATE"
+            SOURCE=github_action_dispatch
+          else
+            OVERRIDE="$TICKERS_OVERRIDE"
+            if [ '${{ github.event_name }}' = 'workflow_dispatch' ]; then
+              SOURCE=github_action_manual
+            else
+              SOURCE=github_action_batch
+            fi
+
+            if [ -z "$TRADE_DATE_INPUT" ]; then
+              DATE="$(date -u +'%Y-%m-%d')"
+            else
+              DATE="$TRADE_DATE_INPUT"
+            fi
+
+            if [ -n "$OVERRIDE" ]; then
+              TICKERS="$OVERRIDE"
+            else
+              TICKERS="$RECOMMENDATION_TICKERS"
+            fi
+          fi
+
+          TICKERS="$(echo "$TICKERS" | tr -d '[:space:]')"
+
+          if [ -z "$TICKERS" ]; then
+            echo '::error::No tickers. Set secret RECOMMENDATION_TICKERS, workflow input tickers_override, or repository_dispatch payload ticker.'
+            exit 1
+          fi
+
+          if [ -z "${DATE:-}" ]; then
+            DATE="$(date -u +'%Y-%m-%d')"
+          fi
+
+          COUNT=0
+          OK=0
+          FAILED=()
+          IFS=',' read -ra ARR <<< "$TICKERS"
+          for raw in "${ARR[@]}"; do
+            sym="$(echo "$raw" | xargs)"
+            [ -z "$sym" ] && continue
+            COUNT=$((COUNT + 1))
+            echo "--- [$COUNT] $sym | trade_date=$DATE | source=$SOURCE ---"
+            if python agent/write_recommendation_cache.py --ticker "$sym" --trade-date "$DATE" --source "$SOURCE" --from-portfolio; then
+              OK=$((OK + 1))
+            else
+              FAILED+=("$sym")
+              echo "::warning::Recommendation failed for $sym (continuing batch)"
+            fi
+          done
+
+          echo "--- AI paper-trade executor (autonomous — uses ai_trading_settings) ---"
+          python agent/execute_ai_trades.py --all --trade-date "$DATE" || echo "::warning::execute_ai_trades.py exited non-zero"
+
+          echo "processed_count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "success_count=$OK" >> "$GITHUB_OUTPUT"
+          echo "## Batch finished" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Event:** ${{ github.event_name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Trade date:** $DATE" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tickers attempted:** $COUNT" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tickers succeeded:** $OK" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Source tag:** $SOURCE" >> "$GITHUB_STEP_SUMMARY"
+          if [ ${#FAILED[@]} -gt 0 ]; then
+            echo "- **Failed tickers:** ${FAILED[*]}" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::Failed tickers (${#FAILED[@]}): ${FAILED[*]}"
+          fi
+          if [ "$OK" -eq 0 ] && [ "$COUNT" -gt 0 ]; then
+            echo "::error::All tickers failed"
+            exit 1
+          fi
+
+  price_refresh:
+    name: Price watch (refresh if stale)
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    concurrency:
+      group: ai-recommendations-price-${{ github.repository }}
+      cancel-in-progress: false
+    if: (github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'price_refresh' || github.event.inputs.mode == 'both'))
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Verify DATABASE_URL secret
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo '::error::Repository secret DATABASE_URL is empty.'
+            exit 1
+          fi
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Verify LLM API key
+        run: |
+          if [ -z "$A_TOKEN" ] && [ -z "$Z_KEY" ] && [ -z "$G_KEY" ]; then
+            echo '::error::Set ANTHROPIC_AUTH_TOKEN (recommended) or Z_API_KEY or GLM_API_KEY.'
+            exit 1
+          fi
+        env:
+          A_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          Z_KEY: ${{ secrets.Z_API_KEY }}
+          G_KEY: ${{ secrets.GLM_API_KEY }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: agent/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r agent/requirements.txt
+
+      - name: Refresh stale caches
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          Z_API_KEY: ${{ secrets.Z_API_KEY }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          LLM_BACKEND_URL: ${{ secrets.LLM_BACKEND_URL }}
+          PRICE_REFRESH_RATIO: ${{ env.PRICE_REFRESH_RATIO }}
+          MAX_CACHE_AGE_DAYS: ${{ env.MAX_CACHE_AGE_DAYS }}
+        run: python agent/refresh_stale_recommendations.py
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Price watch run" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Threshold:** ${{ env.PRICE_REFRESH_RATIO }} (ratio)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Max cache age:** ${{ env.MAX_CACHE_AGE_DAYS }} days" >> "$GITHUB_STEP_SUMMARY"
