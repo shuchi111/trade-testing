@@ -24,7 +24,7 @@ on:
         required: false
         type: string
       trade_date:
-        description: (batch only) YYYY-MM-DD — empty = UTC today
+        description: (batch only) YYYY-MM-DD — empty = IST market date
         required: false
         type: string
 
@@ -35,6 +35,11 @@ env:
   PYTHONUNBUFFERED: '1'
   PRICE_REFRESH_RATIO: '0.03'
   MAX_CACHE_AGE_DAYS: '10'
+  LLM_PROVIDER: ***REMOVED***
+  DEEP_THINK_LLM: glm-5.2
+  QUICK_THINK_LLM: glm-5.2
+  ANTHROPIC_BASE_URL: ***REMOVED***
+  SELL_TRANSACTION_CHARGE_INR: '150'
 
 jobs:
   batch:
@@ -68,8 +73,8 @@ jobs:
           fi
         env:
           A_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
-          Z_KEY: ${{ secrets.Z_API_KEY }}
-          G_KEY: ${{ secrets.GLM_API_KEY }}
+          Z_KEY: ${{ secrets['Z_API_KEY'] }}
+          G_KEY: ${{ secrets['GLM_API_KEY'] }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -88,10 +93,9 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
-          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
-          Z_API_KEY: ${{ secrets.Z_API_KEY }}
-          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
-          LLM_BACKEND_URL: ${{ secrets.LLM_BACKEND_URL }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL || '***REMOVED***' }}
+          Z_API_KEY: ${{ secrets['Z_API_KEY'] }}
+          GLM_API_KEY: ${{ secrets['GLM_API_KEY'] }}
           TICKERS_OVERRIDE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tickers_override || '' }}
           TRADE_DATE_INPUT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.trade_date || '' }}
           RECOMMENDATION_TICKERS: ${{ secrets.RECOMMENDATION_TICKERS }}
@@ -99,21 +103,30 @@ jobs:
           DISPATCH_TRADE_DATE: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.trade_date || '' }}
         run: |
           set -uo pipefail
+          source scripts/market-date.sh
+
+          normalize_param() {
+            case "${1:-}" in
+              ""|"empty"|"EMPTY"|"null"|"NULL") printf "" ;;
+              *) printf "%s" "$1" ;;
+            esac
+          }
 
           if [ '${{ github.event_name }}' = 'repository_dispatch' ]; then
-            TICKERS="$DISPATCH_TICKER"
-            DATE="$DISPATCH_TRADE_DATE"
+            TICKERS="$(normalize_param "$DISPATCH_TICKER")"
+            DATE="$(normalize_param "$DISPATCH_TRADE_DATE")"
             SOURCE=github_action_dispatch
           else
-            OVERRIDE="$TICKERS_OVERRIDE"
+            OVERRIDE="$(normalize_param "$TICKERS_OVERRIDE")"
             if [ '${{ github.event_name }}' = 'workflow_dispatch' ]; then
               SOURCE=github_action_manual
             else
               SOURCE=github_action_batch
             fi
 
+            TRADE_DATE_INPUT="$(normalize_param "$TRADE_DATE_INPUT")"
             if [ -z "$TRADE_DATE_INPUT" ]; then
-              DATE="$(date -u +'%Y-%m-%d')"
+              DATE="$(market_trade_date)"
             else
               DATE="$TRADE_DATE_INPUT"
             fi
@@ -133,7 +146,7 @@ jobs:
           fi
 
           if [ -z "${DATE:-}" ]; then
-            DATE="$(date -u +'%Y-%m-%d')"
+            DATE="$(market_trade_date)"
           fi
 
           COUNT=0
@@ -204,8 +217,8 @@ jobs:
           fi
         env:
           A_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
-          Z_KEY: ${{ secrets.Z_API_KEY }}
-          G_KEY: ${{ secrets.GLM_API_KEY }}
+          Z_KEY: ${{ secrets['Z_API_KEY'] }}
+          G_KEY: ${{ secrets['GLM_API_KEY'] }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -223,10 +236,9 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
-          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
-          Z_API_KEY: ${{ secrets.Z_API_KEY }}
-          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
-          LLM_BACKEND_URL: ${{ secrets.LLM_BACKEND_URL }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL || '***REMOVED***' }}
+          Z_API_KEY: ${{ secrets['Z_API_KEY'] }}
+          GLM_API_KEY: ${{ secrets['GLM_API_KEY'] }}
           PRICE_REFRESH_RATIO: ${{ env.PRICE_REFRESH_RATIO }}
           MAX_CACHE_AGE_DAYS: ${{ env.MAX_CACHE_AGE_DAYS }}
         run: python agent/refresh_stale_recommendations.py
