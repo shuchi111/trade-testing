@@ -267,6 +267,142 @@ def load_recent_wallet_trades(conn, limit: int = 10) -> list[dict[str, Any]]:
     return out
 
 
+def load_recent_wallet_transactions(conn, limit: int = 12) -> list[dict[str, Any]]:
+    """Recent wallet ledger rows shown in Wallet/Activity views."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT type, amount, balance_after, note, created_at
+                FROM wallet_transactions
+                WHERE wallet_id = %s
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (ADMIN_WALLET_ID, limit),
+            )
+            rows = cur.fetchall()
+    except Exception as exc:
+        _rollback_after_optional_query_error(conn, "load_recent_wallet_transactions", exc)
+        return []
+    out = []
+    for tx_type, amount, balance_after, note, created_at in rows:
+        ts = created_at.date() if isinstance(created_at, datetime) else created_at
+        out.append(
+            {
+                "type": str(tx_type or ""),
+                "amount": float(amount or 0),
+                "balance_after": float(balance_after or 0),
+                "note": str(note or ""),
+                "created_at": ts,
+            }
+        )
+    return out
+
+
+def load_recent_ai_trade_executions(
+    conn, ticker: str | None = None, limit: int = 12
+) -> list[dict[str, Any]]:
+    """Recent autonomous execution decisions, including skips, buys, and sells."""
+    try:
+        with conn.cursor() as cur:
+            if ticker:
+                cur.execute(
+                    """
+                    SELECT ticker, trade_date, decision, action_taken, quantity, price, pnl,
+                           skip_reason, dry_run, created_at
+                    FROM ai_trade_executions
+                    WHERE UPPER(ticker) = UPPER(%s)
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                    """,
+                    (ticker, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT ticker, trade_date, decision, action_taken, quantity, price, pnl,
+                           skip_reason, dry_run, created_at
+                    FROM ai_trade_executions
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+            rows = cur.fetchall()
+    except Exception as exc:
+        _rollback_after_optional_query_error(conn, "load_recent_ai_trade_executions", exc)
+        return []
+    return [
+        {
+            "ticker": str(r[0]).upper(),
+            "trade_date": r[1],
+            "decision": r[2] or "",
+            "action_taken": r[3] or "",
+            "quantity": None if r[4] is None else float(r[4]),
+            "price": None if r[5] is None else float(r[5]),
+            "pnl": None if r[6] is None else float(r[6]),
+            "skip_reason": r[7] or "",
+            "dry_run": bool(r[8]),
+            "created_at": r[9],
+        }
+        for r in rows
+    ]
+
+
+def load_portfolio_trade_quality(conn) -> dict[str, Any]:
+    """Dashboard-style realised trade-quality metrics from the live trade ledger."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  COUNT(*) FILTER (WHERE action = 'BUY') AS buy_trades,
+                  COUNT(*) FILTER (WHERE action = 'SELL') AS sell_trades,
+                  COUNT(*) FILTER (WHERE action = 'SELL' AND realized_pnl > 0) AS winning_trades,
+                  COUNT(*) FILTER (WHERE action = 'SELL' AND realized_pnl < 0) AS losing_trades,
+                  COALESCE(SUM(realized_pnl) FILTER (WHERE action = 'SELL'), 0) AS realised_pnl,
+                  COALESCE(SUM(realized_pnl) FILTER (WHERE action = 'SELL' AND realized_pnl > 0), 0) AS gross_profit,
+                  COALESCE(ABS(SUM(realized_pnl) FILTER (WHERE action = 'SELL' AND realized_pnl < 0)), 0) AS gross_loss
+                FROM portfolio_trades
+                WHERE wallet_id = %s
+                """,
+                (ADMIN_WALLET_ID,),
+            )
+            row = cur.fetchone()
+    except Exception as exc:
+        _rollback_after_optional_query_error(conn, "load_portfolio_trade_quality", exc)
+        return {}
+    if not row:
+        return {}
+    buy_trades = int(row[0] or 0)
+    sell_trades = int(row[1] or 0)
+    winning_trades = int(row[2] or 0)
+    losing_trades = int(row[3] or 0)
+    closed = winning_trades + losing_trades
+    gross_profit = float(row[5] or 0)
+    gross_loss = float(row[6] or 0)
+    avg_win = gross_profit / winning_trades if winning_trades else 0.0
+    avg_loss = gross_loss / losing_trades if losing_trades else 0.0
+    win_rate = (winning_trades / closed * 100.0) if closed else 0.0
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else None
+    expectancy = (win_rate / 100.0) * avg_win - (1 - win_rate / 100.0) * avg_loss if closed else 0.0
+    return {
+        "buy_trades": buy_trades,
+        "sell_trades": sell_trades,
+        "winning_trades": winning_trades,
+        "losing_trades": losing_trades,
+        "win_rate_pct": win_rate,
+        "realised_pnl": float(row[4] or 0),
+        "gross_profit": gross_profit,
+        "gross_loss": gross_loss,
+        "average_win": avg_win,
+        "average_loss": avg_loss,
+        "profit_factor": profit_factor,
+        "expectancy": expectancy,
+    }
+
+
 def last_live_buy_date(conn, ticker: str) -> date | None:
     """Most recent filled BUY for ticker from live ledger or executions."""
     try:
@@ -561,6 +697,18 @@ def build_analysis_context(
         f"Estimated equity {_fmt_inr(cash + total_mark)}"
     )
 
+    quality = load_portfolio_trade_quality(conn)
+    if quality:
+        pf = quality["profit_factor"]
+        pf_text = "∞" if pf is None and quality["gross_profit"] > 0 else f"{pf:.2f}" if pf is not None else "n/a"
+        lines.append(
+            "Dashboard trade quality: "
+            f"buy trades={quality['buy_trades']}, sell trades={quality['sell_trades']}, "
+            f"win rate={quality['win_rate_pct']:.1f}%, realised PnL={_fmt_inr(quality['realised_pnl'])}, "
+            f"avg win={_fmt_inr(quality['average_win'])}, avg loss={_fmt_inr(quality['average_loss'])}, "
+            f"profit factor={pf_text}, expectancy={_fmt_inr(quality['expectancy'])}"
+        )
+
     lines.append("")
     lines.append("=== ALL OPEN HOLDINGS (purchase date and days held) ===")
     if all_holdings:
@@ -661,6 +809,45 @@ def build_analysis_context(
             )
     else:
         lines.append("No wallet-level trade history yet.")
+
+    wallet_transactions = load_recent_wallet_transactions(conn)
+    lines.append("")
+    lines.append("=== WALLET ACTIVITY LEDGER (cash movements and balances) ===")
+    if wallet_transactions:
+        for tx in wallet_transactions:
+            note = f" note={tx['note']}" if tx["note"] else ""
+            lines.append(
+                f"{tx['created_at']} {tx['type']} amount {_fmt_inr(tx['amount'])} "
+                f"balance_after {_fmt_inr(tx['balance_after'])}{note}"
+            )
+    else:
+        lines.append("No wallet transaction ledger rows found.")
+
+    ticker_execs = load_recent_ai_trade_executions(conn, ticker=ticker, limit=8)
+    wallet_execs = load_recent_ai_trade_executions(conn, limit=8)
+    lines.append("")
+    lines.append("=== AI EXECUTION HISTORY (recommendation outcomes and skips) ===")
+    if ticker_execs:
+        lines.append(f"Recent executions for {ticker}:")
+        for ex in ticker_execs:
+            pnl_str = "—" if ex["pnl"] is None else _fmt_inr(ex["pnl"])
+            price_str = "—" if ex["price"] is None else _fmt_inr(ex["price"])
+            reason = f", reason={ex['skip_reason']}" if ex["skip_reason"] else ""
+            dry = " dry-run" if ex["dry_run"] else ""
+            lines.append(
+                f"{ex['trade_date']} {ex['action_taken']}{dry} qty={ex['quantity']} "
+                f"price={price_str} pnl={pnl_str}{reason}"
+            )
+    else:
+        lines.append(f"No AI execution rows for {ticker}.")
+    if wallet_execs:
+        lines.append("Recent executions across wallet:")
+        for ex in wallet_execs:
+            pnl_str = "—" if ex["pnl"] is None else _fmt_inr(ex["pnl"])
+            reason = f", reason={ex['skip_reason']}" if ex["skip_reason"] else ""
+            lines.append(
+                f"{ex['trade_date']} {ex['ticker']} {ex['action_taken']} pnl={pnl_str}{reason}"
+            )
 
     summaries = load_backtest_strategy_summaries(conn, ticker)
     lines.append("")
