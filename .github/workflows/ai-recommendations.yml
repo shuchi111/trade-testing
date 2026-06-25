@@ -5,7 +5,8 @@ name: AI recommendations (cache)
 
 on:
   schedule:
-    - cron: '0 6 * * 1-5' # Weekdays 11:30 AM IST (6:00 AM UTC) — full batch: all tickers
+    # Weekdays 1:30 PM IST (8:00 AM UTC) — full batch: all tickers.
+    - cron: '0 8 * * 1-5'
   repository_dispatch:
     types: [ai-recommendation]
   workflow_dispatch:
@@ -73,8 +74,8 @@ jobs:
           fi
         env:
           A_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
-          Z_KEY: ${{ secrets['Z_API_KEY'] }}
-          G_KEY: ${{ secrets['GLM_API_KEY'] }}
+          Z_KEY: ${{ secrets.Z_API_KEY }}
+          G_KEY: ${{ secrets.GLM_API_KEY }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -94,8 +95,8 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL || '***REMOVED***' }}
-          Z_API_KEY: ${{ secrets['Z_API_KEY'] }}
-          GLM_API_KEY: ${{ secrets['GLM_API_KEY'] }}
+          Z_API_KEY: ${{ secrets.Z_API_KEY }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
           TICKERS_OVERRIDE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tickers_override || '' }}
           TRADE_DATE_INPUT: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.trade_date || '' }}
           RECOMMENDATION_TICKERS: ${{ secrets.RECOMMENDATION_TICKERS }}
@@ -217,8 +218,8 @@ jobs:
           fi
         env:
           A_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
-          Z_KEY: ${{ secrets['Z_API_KEY'] }}
-          G_KEY: ${{ secrets['GLM_API_KEY'] }}
+          Z_KEY: ${{ secrets.Z_API_KEY }}
+          G_KEY: ${{ secrets.GLM_API_KEY }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -237,8 +238,8 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL || '***REMOVED***' }}
-          Z_API_KEY: ${{ secrets['Z_API_KEY'] }}
-          GLM_API_KEY: ${{ secrets['GLM_API_KEY'] }}
+          Z_API_KEY: ${{ secrets.Z_API_KEY }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
           PRICE_REFRESH_RATIO: ${{ env.PRICE_REFRESH_RATIO }}
           MAX_CACHE_AGE_DAYS: ${{ env.MAX_CACHE_AGE_DAYS }}
         run: python agent/refresh_stale_recommendations.py
