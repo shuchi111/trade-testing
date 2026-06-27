@@ -148,7 +148,7 @@ Used by `refresh_stale_recommendations.py` and the `execute-ai-trades` job (pric
 | Debate rounds | **1** |
 | Risk discuss rounds | **1** |
 | Recursion limit | **1000** |
-| Data vendors | all **yfinance** |
+| Data vendors | exact chain, default **yfinance** |
 
 ### Env overrides
 
@@ -165,6 +165,13 @@ Used by `refresh_stale_recommendations.py` and the `execute-ai-trades` job (pric
 | `SIGNAL_EXTRACT_RETRY_DELAY_SEC` | `1.25` |
 | `DATA_VENDOR_STOCKS` / `INDICATORS` / `FUNDAMENTALS` / `NEWS` | `yfinance` |
 | `YFINANCE_HISTORY_PERIOD` | `10d` |
+| `MAX_MARKET_DATA_STALE_DAYS` | `5` |
+
+Configured data vendors are strict: `yfinance` means only yfinance. Use an explicit chain such as `yfinance,alpha_vantage` if fallback is desired.
+
+AI recommendations now use a verified market snapshot before LLM analysis. If real OHLCV is missing or older than `MAX_MARKET_DATA_STALE_DAYS`, the ticker is skipped instead of trading from stale data.
+
+The recommendation context also includes a deterministic Minervini strategy evidence block computed from real OHLCV. This is evidence for the 12-agent decision flow, not a replacement for the final portfolio-manager decision.
 
 ### CircleCI `batch-shard` job (hardcoded in `.circleci/config.yml`)
 
