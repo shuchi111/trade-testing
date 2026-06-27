@@ -34,6 +34,7 @@ import psycopg2
 from canonical_decision import resolve_canonical_decision
 from db_url import resolve_psycopg2_url
 from market_date import market_trade_date
+from tradingagents.dataflows.market_data_validator import require_fresh_market_snapshot
 from portfolio_db import (
     ADMIN_WALLET_ID,
     evaluate_trailing_stop,
@@ -178,7 +179,17 @@ def decide_and_execute(
     )
     bucket = recommendation_bucket(decision)
     hold_qty, avg_entry = load_holding(conn, ticker)
-    price = reco["reference_price"] or fetch_last_close(ticker)
+    try:
+        snapshot = require_fresh_market_snapshot(ticker, trade_date)
+    except Exception as exc:
+        log_execution(
+            conn, ticker=ticker, trade_date=trade_date, decision=decision,
+            action="SKIP", qty=None, price=None, pnl=None,
+            recommendation_id=reco["id"], skip_reason=f"stale_market_data:{exc}", dry_run=dry_run,
+        )
+        return {"ok": True, "ticker": ticker, "action_taken": "SKIP", "skip_reason": "stale_market_data"}
+
+    price = reco["reference_price"] or snapshot.latest_close or fetch_last_close(ticker)
     if not price or price <= 0:
         log_execution(
             conn, ticker=ticker, trade_date=trade_date, decision=decision,
