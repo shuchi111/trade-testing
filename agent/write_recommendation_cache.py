@@ -45,6 +45,7 @@ from market_date import adjust_to_last_trading_day, ist_today
 from portfolio_db import build_analysis_context, load_holding
 from recommendation_bucket import recommendation_bucket
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.dataflows.market_data_validator import require_fresh_market_snapshot
 from tradingagents.graph.signal_processing import is_transient_propagate_error
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
@@ -459,11 +460,13 @@ def run_single_recommendation(
     if holding_quantity < 0 or holding_avg_entry < 0:
         return {"ok": False, "error": "holding_quantity and holding_avg_entry must be >= 0", "ticker": ticker}
 
-    reference_price = fetch_last_close(ticker)
-    if reference_price is None:
+    try:
+        snapshot = require_fresh_market_snapshot(ticker, trade_date)
+        reference_price = snapshot.latest_close
+    except Exception as exc:
         return {
             "ok": False,
-            "error": "Real market reference price unavailable from yfinance",
+            "error": f"Verified fresh market data unavailable: {exc}",
             "ticker": ticker,
             "trade_date": trade_date,
         }
