@@ -14,6 +14,7 @@ from trading_constraints import (
     swing_exit_window_days,
     transaction_charge_for_action,
 )
+from tradingagents.agents.utils.strategy_checks import format_minervini_evidence
 
 ADMIN_WALLET_ID = "00000000-0000-0000-0000-000000000001"
 logger = logging.getLogger(__name__)
@@ -783,6 +784,13 @@ def build_analysis_context(
             f"Paper transaction charges: {', '.join(parts)} — "
             "cash and sell PnL reflect applicable charges"
         )
+
+    lines.append("")
+    try:
+        lines.append(format_minervini_evidence(ticker))
+    except Exception as exc:
+        lines.append("=== MINERVINI STRATEGY EVIDENCE ===")
+        lines.append(f"Unavailable from real OHLCV for {ticker}: {exc}")
 
     live_trades = load_recent_portfolio_trades(conn, ticker)
     lines.append("")
