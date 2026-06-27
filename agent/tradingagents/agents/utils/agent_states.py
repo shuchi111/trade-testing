@@ -43,3 +43,5 @@ class AgentState(MessagesState):
     final_trade_decision: Annotated[str, "Final decision made by the Risk Analysts"]
 
     portfolio_context: Annotated[str, "Current paper wallet holding for this ticker (quantity and avg entry price)"]
+    instrument_context: Annotated[str, "Resolved ticker/company identity context"]
+    market_snapshot: Annotated[str, "Verified market snapshot context"]

@@ -20,7 +20,8 @@ DEFAULT_CONFIG = {
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
     "max_recur_limit": 1000,
-    # Data vendor configuration (all default to yfinance — no extra API keys needed)
+    # Data vendor configuration (exact chain; use "yfinance,alpha_vantage" for explicit fallback)
+    "strict_vendor_chain": True,
     "data_vendors": {
         "core_stock_apis": "yfinance",
         "technical_indicators": "yfinance",
