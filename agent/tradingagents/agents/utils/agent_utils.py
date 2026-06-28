@@ -1,6 +1,7 @@
 from langchain_core.messages import HumanMessage, RemoveMessage
 
 from tradingagents.agents.utils.core_stock_tools import get_stock_data
+from tradingagents.agents.utils.market_data_validation_tools import get_verified_market_snapshot
 from tradingagents.agents.utils.technical_indicators_tools import get_indicators
 from tradingagents.agents.utils.fundamental_data_tools import (
     get_fundamentals,
@@ -13,12 +14,27 @@ from tradingagents.agents.utils.news_data_tools import (
     get_insider_transactions,
     get_global_news,
 )
-from tradingagents.agents.utils.market_data_validation_tools import get_verified_market_snapshot
 from tradingagents.dataflows.symbol_utils import resolve_instrument_identity
 
 
 def build_instrument_context(ticker: str, identity: dict | None = None) -> str:
-    """Describe the exact instrument so agents preserve ticker and company identity"""
+    """Describe the exact instrument for downstream agents.
+
+    Parameters
+    ----------
+    ticker
+        Exchange-qualified instrument symbol to preserve in tool calls,
+        reports, and recommendations.
+    identity
+        Optional pre-resolved identity metadata. When omitted, identity is
+        looked up best-effort from the ticker.
+
+    Returns
+    -------
+    str
+        Instructional context reminding agents to use ``ticker`` exactly and,
+        when available, preserve the resolved company identity.
+    """
     context = (
         f"The instrument to analyze is `{ticker}`. "
         "Use this exact ticker in every tool call, report, and recommendation, "
@@ -48,6 +64,19 @@ def build_instrument_context(ticker: str, identity: dict | None = None) -> str:
 
 
 def get_instrument_context_from_state(state: dict) -> str:
+    """Build exact-instrument context from an agent state mapping.
+
+    Parameters
+    ----------
+    state
+        Agent state containing ``company_of_interest`` or ``ticker``.
+
+    Returns
+    -------
+    str
+        Instrument-preservation instructions from state, reusing an existing
+        ``instrument_context`` when present.
+    """
     context = state.get("instrument_context")
     if isinstance(context, str) and context.strip():
         return context

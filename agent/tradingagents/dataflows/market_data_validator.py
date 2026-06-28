@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 from .errors import StaleMarketDataError, VendorDataError
@@ -31,6 +31,8 @@ def _as_date(value: Any) -> date | None:
     if value is None:
         return None
     if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc).date()
         return value.date()
     if isinstance(value, date):
         return value
@@ -51,7 +53,31 @@ def verified_market_snapshot(
     period: str | None = None,
     max_stale_days: int | None = None,
 ) -> MarketSnapshot:
-    """Return a real yfinance snapshot with freshness metadata."""
+    """Return a real yfinance snapshot with freshness metadata.
+
+    Parameters
+    ----------
+    ticker
+        Exchange-qualified instrument symbol to validate.
+    trade_date
+        Target recommendation/trade date. If provided, freshness is measured
+        against the latest market bar date.
+    period
+        Optional yfinance history period. Defaults to ``YFINANCE_HISTORY_PERIOD``
+        or ``1y``.
+    max_stale_days
+        Optional override for the allowed age of the latest market bar.
+
+    Returns
+    -------
+    MarketSnapshot
+        Validated latest close, volume, metadata, and freshness fields.
+
+    Raises
+    ------
+    VendorDataError
+        If yfinance fails or returns missing/invalid market data.
+    """
     import yfinance as yf
 
     symbol = normalize_symbol(ticker)
@@ -67,9 +93,7 @@ def verified_market_snapshot(
 
     row = hist.iloc[-1]
     latest_idx = hist.index[-1]
-    latest_date = _as_date(getattr(latest_idx, "date", lambda: latest_idx)())
-    if latest_date is None:
-        latest_date = _as_date(latest_idx)
+    latest_date = _as_date(latest_idx)
     if latest_date is None:
         raise VendorDataError(f"Could not resolve latest bar date for {symbol}")
 
@@ -136,6 +160,31 @@ def require_fresh_market_snapshot(
     period: str | None = None,
     max_stale_days: int | None = None,
 ) -> MarketSnapshot:
+    """Return a verified snapshot or raise when it is stale.
+
+    Parameters
+    ----------
+    ticker
+        Exchange-qualified instrument symbol to validate.
+    trade_date
+        Target recommendation/trade date for freshness checks.
+    period
+        Optional yfinance history period.
+    max_stale_days
+        Optional override for the allowed age of the latest market bar.
+
+    Returns
+    -------
+    MarketSnapshot
+        Fresh validated market snapshot.
+
+    Raises
+    ------
+    StaleMarketDataError
+        If the latest bar is outside the allowed freshness window.
+    VendorDataError
+        If yfinance fails or returns missing/invalid market data.
+    """
     snapshot = verified_market_snapshot(
         ticker, trade_date, period=period, max_stale_days=max_stale_days
     )
@@ -145,6 +194,19 @@ def require_fresh_market_snapshot(
 
 
 def format_market_snapshot(snapshot: MarketSnapshot | dict[str, Any]) -> str:
+    """Format a market snapshot for LLM context.
+
+    Parameters
+    ----------
+    snapshot
+        ``MarketSnapshot`` instance or equivalent dictionary.
+
+    Returns
+    -------
+    str
+        Human-readable freshness summary with latest close/date and stale
+        reason.
+    """
     data = snapshot.to_dict() if isinstance(snapshot, MarketSnapshot) else snapshot
     volume = data.get("latest_volume")
     volume_text = f"{volume:,.0f}" if isinstance(volume, (int, float)) else "n/a"
