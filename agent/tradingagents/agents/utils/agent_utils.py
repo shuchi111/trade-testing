@@ -18,7 +18,7 @@ from tradingagents.dataflows.symbol_utils import resolve_instrument_identity
 
 
 def build_instrument_context(ticker: str, identity: dict | None = None) -> str:
-    """Describe the exact instrument so agents preserve ticker and company identity."""
+    """Describe the exact instrument so agents preserve ticker and company identity"""
     context = (
         f"The instrument to analyze is `{ticker}`. "
         "Use this exact ticker in every tool call, report, and recommendation, "
