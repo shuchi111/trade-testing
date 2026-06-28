@@ -14,7 +14,6 @@ from trading_constraints import (
     swing_exit_window_days,
     transaction_charge_for_action,
 )
-from tradingagents.agents.utils.strategy_checks import format_minervini_evidence
 
 ADMIN_WALLET_ID = "00000000-0000-0000-0000-000000000001"
 logger = logging.getLogger(__name__)
@@ -659,7 +658,26 @@ def build_analysis_context(
     trade_date: str,
     reference_price: float | None = None,
 ) -> str:
-    """Rich portfolio + history context for LLM agents."""
+    """Build portfolio and trade-history context for LLM agents.
+
+    Parameters
+    ----------
+    conn
+        Open psycopg2 connection used to read wallet, holding, trade, and
+        recommendation rows.
+    ticker
+        Exchange-qualified instrument symbol to analyze.
+    trade_date
+        Analysis date in ``YYYY-MM-DD`` format.
+    reference_price
+        Optional latest validated recommendation price for ``ticker``. When
+        omitted, current-position estimates fall back to average entry.
+
+    Returns
+    -------
+    str
+        Multi-section context string for the trading agents.
+    """
     ticker = ticker.strip().upper()
     as_of = datetime.strptime(trade_date, "%Y-%m-%d").date()
     cap = max_position_inr()
@@ -675,7 +693,12 @@ def build_analysis_context(
     if reference_price and reference_price > 0:
         all_prices[ticker] = reference_price
 
-    current_value = qty * reference_price if reference_price and qty > 0 else qty * avg_entry if qty > 0 else 0.0
+    if qty <= 0:
+        current_value = 0.0
+    elif reference_price is not None:
+        current_value = qty * reference_price
+    else:
+        current_value = qty * avg_entry
     room_to_cap = max(0.0, cap - current_value)
     held_days = days_held(conn, ticker, as_of)
 
@@ -784,13 +807,6 @@ def build_analysis_context(
             f"Paper transaction charges: {', '.join(parts)} — "
             "cash and sell PnL reflect applicable charges"
         )
-
-    lines.append("")
-    try:
-        lines.append(format_minervini_evidence(ticker))
-    except Exception as exc:
-        lines.append("=== MINERVINI STRATEGY EVIDENCE ===")
-        lines.append(f"Unavailable from real OHLCV for {ticker}: {exc}")
 
     live_trades = load_recent_portfolio_trades(conn, ticker)
     lines.append("")
@@ -1000,9 +1016,37 @@ def execute_trade(conn, *, ticker: str, action: str, quantity: float, price: flo
     """
     Execute paper trade via ``execute_wallet_trade``.
 
-    Applies per-leg charges from ``BUY_TRANSACTION_CHARGE_INR`` / ``SELL_TRANSACTION_CHARGE_INR``
-    (deducted from cash; SELL ``realized_pnl`` is net of sell charge).
-    Returns net ``realized_pnl`` for SELL, else ``None``.
+    Parameters
+    ----------
+    conn
+        Open psycopg2 connection used to execute the wallet trade and ledger
+        updates.
+    ticker
+        Exchange-qualified instrument symbol.
+    action
+        Trade side, expected to be ``BUY`` or ``SELL``.
+    quantity
+        Share quantity to trade. The caller is responsible for applying any
+        whole-share or fractional-share policy before calling this function.
+    price
+        Validated execution reference price.
+
+    Returns
+    -------
+    float | None
+        Net realized PnL for ``SELL`` trades, otherwise ``None``.
+
+    Raises
+    ------
+    ValueError
+        If a ``BUY`` would breach available cash after charges and required
+        cash reserve.
+
+    Notes
+    -----
+    Applies per-leg charges from ``BUY_TRANSACTION_CHARGE_INR`` /
+    ``SELL_TRANSACTION_CHARGE_INR``. Charges are deducted from cash; ``SELL``
+    ``realized_pnl`` is net of the sell charge.
     """
     ticker = ticker.upper()
     charge = transaction_charge_for_action(action)

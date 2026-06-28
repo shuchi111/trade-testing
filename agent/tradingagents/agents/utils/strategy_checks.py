@@ -32,7 +32,26 @@ def _float(value: Any) -> float | None:
 
 
 def build_minervini_evidence(ticker: str, period: str = "1y") -> MinerviniEvidence:
-    """Compute a deterministic Minervini-style trend-template evidence block."""
+    """Compute a deterministic Minervini-style trend-template evidence block.
+
+    Parameters
+    ----------
+    ticker
+        Exchange-qualified instrument symbol to evaluate.
+    period
+        yfinance history period used for OHLCV retrieval.
+
+    Returns
+    -------
+    MinerviniEvidence
+        Latest close/date, pass count, overall pass flag, and per-check lines.
+
+    Raises
+    ------
+    ValueError
+        If real OHLCV data is unavailable, has fewer than 200 closes, or has an
+        invalid latest close.
+    """
     import yfinance as yf
 
     symbol = normalize_symbol(ticker)
