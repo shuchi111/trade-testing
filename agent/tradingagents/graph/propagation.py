@@ -12,12 +12,21 @@ class Propagator:
     def __init__(self, max_recur_limit=1000):
         self.max_recur_limit = max_recur_limit
 
-    def create_initial_state(self, company_name: str, trade_date: str, portfolio_context: str = "") -> Dict[str, Any]:
+    def create_initial_state(
+        self,
+        company_name: str,
+        trade_date: str,
+        portfolio_context: str = "",
+        instrument_context: str = "",
+        market_snapshot: str = "",
+    ) -> Dict[str, Any]:
         return {
             "messages": [("human", company_name)],
             "company_of_interest": company_name,
             "trade_date": str(trade_date),
             "portfolio_context": portfolio_context,
+            "instrument_context": instrument_context,
+            "market_snapshot": market_snapshot,
             "investment_debate_state": InvestDebateState(
                 {
                     "bull_history": "",
