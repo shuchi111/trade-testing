@@ -21,6 +21,7 @@ from .alpha_vantage import (
 )
 from .alpha_vantage_common import AlphaVantageRateLimitError
 from .config import get_config
+from .errors import VendorConfigurationError, VendorDataError
 
 VENDOR_METHODS = {
     "get_stock_data": {"alpha_vantage": get_alpha_vantage_stock, "yfinance": get_YFin_data_online},
@@ -61,25 +62,32 @@ def get_vendor(category: str, method: str = None) -> str:
 def route_to_vendor(method: str, *args, **kwargs):
     category = get_category_for_method(method)
     vendor_config = get_vendor(category, method)
-    primary_vendors = [v.strip() for v in vendor_config.split(',')]
+    configured_vendors = [v.strip() for v in vendor_config.split(',') if v.strip()]
 
     if method not in VENDOR_METHODS:
-        raise ValueError(f"Method '{method}' not supported")
+        raise VendorConfigurationError(f"Method '{method}' not supported")
+    if not configured_vendors:
+        raise VendorConfigurationError(f"No vendors configured for '{method}'")
 
-    all_available_vendors = list(VENDOR_METHODS[method].keys())
-    fallback_vendors = primary_vendors.copy()
-    for vendor in all_available_vendors:
-        if vendor not in fallback_vendors:
-            fallback_vendors.append(vendor)
-
-    for vendor in fallback_vendors:
+    errors = []
+    for vendor in configured_vendors:
         if vendor not in VENDOR_METHODS[method]:
-            continue
+            raise VendorConfigurationError(
+                f"Vendor '{vendor}' not supported for '{method}'. "
+                f"Supported: {', '.join(VENDOR_METHODS[method].keys())}"
+            )
         vendor_impl = VENDOR_METHODS[method][vendor]
         impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
         try:
             return impl_func(*args, **kwargs)
-        except AlphaVantageRateLimitError:
+        except AlphaVantageRateLimitError as exc:
+            errors.append(f"{vendor}: rate limited ({exc})")
+            continue
+        except Exception as exc:
+            errors.append(f"{vendor}: {exc}")
             continue
 
-    raise RuntimeError(f"No available vendor for '{method}'")
+    raise VendorDataError(
+        f"No configured vendor returned data for '{method}'. "
+        f"Tried {', '.join(configured_vendors)}. Errors: {'; '.join(errors) or 'none'}"
+    )

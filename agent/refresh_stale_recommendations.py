@@ -31,7 +31,8 @@ load_dotenv(SWING_TRADER_ROOT / ".env")
 import datetime as dt
 import psycopg2
 
-from write_recommendation_cache import fetch_last_close, run_single_recommendation
+from tradingagents.dataflows.market_data_validator import require_fresh_market_snapshot
+from write_recommendation_cache import run_single_recommendation
 
 
 def _parse_refresh_ratio(raw: str) -> float:
@@ -103,7 +104,15 @@ def main() -> None:
             h_qty,
             h_entry,
         ) in rows:
-            current = fetch_last_close(ticker)
+            try:
+                current = require_fresh_market_snapshot(ticker, today_str).latest_close
+            except Exception as exc:
+                print(
+                    f"[refresh_stale] SKIP {ticker}: stale_or_missing_market_data: {exc}",
+                    file=sys.stderr,
+                )
+                skipped_tickers.append(ticker)
+                continue
             if isinstance(cache_day, dt.date):
                 days_old = (today - cache_day).days
             else:

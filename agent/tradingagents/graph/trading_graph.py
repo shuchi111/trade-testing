@@ -19,8 +19,10 @@ from tradingagents.agents.utils.agent_states import (
 from tradingagents.dataflows.config import set_config
 
 from tradingagents.agents.utils.agent_utils import (
+    build_instrument_context,
     get_stock_data,
     get_indicators,
+    get_verified_market_snapshot,
     get_fundamentals,
     get_balance_sheet,
     get_cashflow,
@@ -29,6 +31,8 @@ from tradingagents.agents.utils.agent_utils import (
     get_insider_transactions,
     get_global_news,
 )
+from tradingagents.dataflows.market_data_validator import format_market_snapshot, verified_market_snapshot
+from tradingagents.dataflows.symbol_utils import resolve_instrument_identity
 
 from .conditional_logic import ConditionalLogic
 from .setup import GraphSetup
@@ -172,7 +176,7 @@ class TradingAgentsGraph:
 
     def _create_tool_nodes(self) -> Dict[str, ToolNode]:
         return {
-            "market": ToolNode([get_stock_data, get_indicators]),
+            "market": ToolNode([get_stock_data, get_indicators, get_verified_market_snapshot]),
             "social": ToolNode([get_news]),
             "news": ToolNode([get_news, get_global_news, get_insider_transactions]),
             "fundamentals": ToolNode([get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement]),
@@ -180,9 +184,21 @@ class TradingAgentsGraph:
 
     def propagate(self, company_name, trade_date, portfolio_context: str = ""):
         self.ticker = company_name
+        identity = resolve_instrument_identity(company_name)
+        instrument_context = build_instrument_context(company_name, identity=identity)
+        try:
+            market_snapshot = format_market_snapshot(
+                verified_market_snapshot(company_name, trade_date)
+            )
+        except Exception as exc:
+            market_snapshot = f"Verified market snapshot unavailable: {exc}"
 
         init_agent_state = self.propagator.create_initial_state(
-            company_name, trade_date, portfolio_context=portfolio_context
+            company_name,
+            trade_date,
+            portfolio_context=portfolio_context,
+            instrument_context=instrument_context,
+            market_snapshot=market_snapshot,
         )
         args = self.propagator.get_graph_args()
 
