@@ -30,6 +30,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_news,
     get_insider_transactions,
     get_global_news,
+    langchain_tools,
 )
 from tradingagents.dataflows.market_data_validator import format_market_snapshot, verified_market_snapshot
 from tradingagents.dataflows.symbol_utils import resolve_instrument_identity
@@ -176,10 +177,10 @@ class TradingAgentsGraph:
 
     def _create_tool_nodes(self) -> Dict[str, ToolNode]:
         return {
-            "market": ToolNode([get_stock_data, get_indicators, get_verified_market_snapshot]),
-            "social": ToolNode([get_news]),
-            "news": ToolNode([get_news, get_global_news, get_insider_transactions]),
-            "fundamentals": ToolNode([get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement]),
+            "market": ToolNode(langchain_tools([get_stock_data, get_indicators, get_verified_market_snapshot])),
+            "social": ToolNode(langchain_tools([get_news])),
+            "news": ToolNode(langchain_tools([get_news, get_global_news, get_insider_transactions])),
+            "fundamentals": ToolNode(langchain_tools([get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement])),
         }
 
     def propagate(self, company_name, trade_date, portfolio_context: str = ""):

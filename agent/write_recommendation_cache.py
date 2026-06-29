@@ -492,6 +492,7 @@ def run_single_recommendation(
                 ta, ticker, trade_date, portfolio_context
             )
         except Exception as e:
+            logger.exception("TradingAgentsGraph failed for %s trade_date=%s", ticker, trade_date)
             return {"ok": False, "error": str(e), "ticker": ticker, "trade_date": trade_date}
 
         final_trade_decision = final_state.get("final_trade_decision") or ""

@@ -3,6 +3,7 @@ from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     get_global_news,
     get_news,
+    langchain_tools,
     tool_names,
 )
 from tradingagents.dataflows.config import get_config
@@ -13,7 +14,7 @@ def create_news_analyst(llm):
         current_date = state["trade_date"]
         instrument_context = build_instrument_context(state["company_of_interest"])
 
-        tools = [get_news, get_global_news]
+        tools = langchain_tools([get_news, get_global_news])
 
         system_message = (
             "You are a news researcher tasked with analyzing recent news and trends over the past week. "

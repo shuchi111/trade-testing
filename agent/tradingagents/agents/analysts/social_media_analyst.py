@@ -1,5 +1,10 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from tradingagents.agents.utils.agent_utils import build_instrument_context, get_news, tool_names
+from tradingagents.agents.utils.agent_utils import (
+    build_instrument_context,
+    get_news,
+    langchain_tools,
+    tool_names,
+)
 from tradingagents.dataflows.config import get_config
 
 
@@ -8,7 +13,7 @@ def create_social_media_analyst(llm):
         current_date = state["trade_date"]
         instrument_context = build_instrument_context(state["company_of_interest"])
 
-        tools = [get_news]
+        tools = langchain_tools([get_news])
 
         system_message = (
             "You are a social media and company specific news researcher/analyst tasked with analyzing social media posts, "

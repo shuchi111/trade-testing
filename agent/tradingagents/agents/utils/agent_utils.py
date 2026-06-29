@@ -1,4 +1,5 @@
 from langchain_core.messages import HumanMessage, RemoveMessage
+from langchain_core.tools import BaseTool, tool as create_tool
 
 from tradingagents.agents.utils.core_stock_tools import get_stock_data
 from tradingagents.agents.utils.market_data_validation_tools import get_verified_market_snapshot
@@ -15,6 +16,14 @@ from tradingagents.agents.utils.news_data_tools import (
     get_global_news,
 )
 from tradingagents.dataflows.symbol_utils import resolve_instrument_identity
+
+
+def langchain_tools(tools: list) -> list[BaseTool]:
+    """Normalize mixed tool definitions before binding them to LLMs or ToolNode."""
+    return [
+        candidate if isinstance(candidate, BaseTool) else create_tool(candidate)
+        for candidate in tools
+    ]
 
 
 def tool_names(tools: list) -> str:

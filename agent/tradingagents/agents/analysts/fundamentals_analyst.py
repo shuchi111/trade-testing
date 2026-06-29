@@ -6,6 +6,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_fundamentals,
     get_income_statement,
     get_insider_transactions,
+    langchain_tools,
     tool_names,
 )
 from tradingagents.dataflows.config import get_config
@@ -16,7 +17,7 @@ def create_fundamentals_analyst(llm):
         current_date = state["trade_date"]
         instrument_context = build_instrument_context(state["company_of_interest"])
 
-        tools = [get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement]
+        tools = langchain_tools([get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement])
 
         system_message = (
             "You are a researcher tasked with analyzing fundamental information about a company. "
