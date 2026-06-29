@@ -1,39 +1,40 @@
 # trade-circleci-cron
 
-Daily AI recommendations for 22 tickers via CircleCI.
+Daily AI recommendations for 22 tickers via GitHub Actions.
 
 ## Thresholds & defaults
 
-All trading limits, transaction charges, thesis-break rules, LLM defaults, and CircleCI settings are documented in **[thresholds.md](thresholds.md)**.
+All trading limits, transaction charges, thesis-break rules, LLM defaults, and scheduler settings are documented in **[thresholds.md](thresholds.md)**.
 
 ## Setup
 
 1. Push to GitHub (`main` branch).
-2. Connect repo in [CircleCI](https://circleci.com).
-3. Add env vars in Project Settings (see `env.example`):
+2. Enable GitHub Actions for the repository.
+3. Add repository secrets (see `env.example`):
    - `DATABASE_URL`
    - `RECOMMENDATION_TICKERS` (comma-separated, no spaces)
-   - `Z_API_KEY` or `GLM_API_KEY` (+ `LLM_PROVIDER=***REMOVED***`, see `env.example`)
-4. Test once: CircleCI → **Pipelines** → **Trigger Pipeline** on `main` (leave `trade_date` empty).
-5. CircleCI schedule runs automatically **Mon–Fri 11:30 IST** (`0 6 * * 1-5` UTC) — **not on git push**.
+   - `ANTHROPIC_AUTH_TOKEN`, `Z_API_KEY`, or `GLM_API_KEY`
+4. Test once: GitHub → **Actions** → **AI recommendations (cache)** → **Run workflow** on `main` (leave `trade_date` empty).
+5. GitHub Actions schedule runs automatically **Mon-Fri 10:30 AM IST** (`0 5 * * 1-5` UTC).
 
 ## When the pipeline runs
 
 | Trigger | Runs batch jobs? | Notes |
 |---------|------------------|-------|
-| Git push to `main` | **No** | Workflows filtered out; push = `webhook` |
-| CircleCI schedule (11:30 IST weekdays) | **Yes** | Set `run_scheduled=true`; runs `scheduled-ai-recommendations` only |
-| **Trigger Pipeline** in CircleCI UI | **Yes** | `manual-ai-recommendations` workflow only (`api` trigger) |
+| Git push to `main` | **No** | Workflow is scheduled/manual only |
+| GitHub Actions schedule (10:30 AM IST weekdays) | **Yes** | Runs `.github/workflows/ai-recommendations.yml` from the default branch |
+| **Run workflow** in GitHub Actions UI | **Yes** | Use `mode=batch` or `mode=both` |
+| Repository dispatch `ai-recommendation` | **Yes** | Can run one dispatched ticker payload |
 
-Push may still create an empty pipeline entry in CircleCI (no jobs). That is expected.
+GitHub scheduled workflows run only from the default branch and can start a few minutes later than the exact cron time.
 
-**CircleCI schedule:** create one UI schedule on `main` with cron `0 6 * * 1-5` UTC = 11:30 IST, Monday–Friday only. Add pipeline parameter `run_scheduled=true`.
+**GitHub Actions schedule:** `0 5 * * 1-5` UTC = 10:30 AM IST, Monday-Friday only.
 
 See [thresholds.md](thresholds.md) for full cron and trigger details.
 
 ## Trade date
 
-Leave `trade_date` empty in CircleCI — it uses **today in IST**. Saturday/Sunday roll back to Friday (NSE weekdays only; holidays not skipped).
+Leave `trade_date` empty in GitHub Actions — it uses **today in IST**. Saturday/Sunday roll back to Friday (NSE weekdays only; holidays not skipped).
 
 ## Pipeline modes
 
