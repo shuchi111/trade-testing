@@ -17,6 +17,14 @@ from tradingagents.agents.utils.news_data_tools import (
 from tradingagents.dataflows.symbol_utils import resolve_instrument_identity
 
 
+def tool_names(tools: list) -> str:
+    """Return display names for LangChain tools and plain Python functions."""
+    return ", ".join(
+        getattr(tool, "name", None) or getattr(tool, "__name__", str(tool))
+        for tool in tools
+    )
+
+
 def build_instrument_context(ticker: str, identity: dict | None = None) -> str:
     """Describe the exact instrument for downstream agents.
 
