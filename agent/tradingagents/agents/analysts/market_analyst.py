@@ -4,6 +4,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_stock_data,
     get_verified_market_snapshot,
+    tool_names,
 )
 from tradingagents.agents.utils.swing_policy import SWING_MARKET_ANALYST_INSTRUCTIONS
 from tradingagents.dataflows.config import get_config
@@ -62,7 +63,7 @@ Write a detailed, nuanced swing-trading oriented report.
         )
 
         prompt = prompt.partial(system_message=system_message)
-        prompt = prompt.partial(tool_names=", ".join([tool.name for tool in tools]))
+        prompt = prompt.partial(tool_names=tool_names(tools))
         prompt = prompt.partial(current_date=current_date)
         prompt = prompt.partial(instrument_context=instrument_context)
         prompt = prompt.partial(market_snapshot=market_snapshot)
