@@ -56,6 +56,13 @@ logger = logging.getLogger("execute_ai_trades")
 SETTINGS_ID = "00000000-0000-0000-0000-000000000002"
 
 
+def trade_block_skip_reason(exc: ValueError) -> str:
+    message = str(exc).lower()
+    if "no open position" in message or "cannot sell" in message:
+        return "no_position_to_sell"
+    return "insufficient_cash"
+
+
 def load_settings(conn) -> dict:
     with conn.cursor() as cur:
         cur.execute(
@@ -217,7 +224,7 @@ def decide_and_execute(
                 elif avg_entry > 0:
                     pnl = (price - avg_entry) * qty - sell_transaction_charge_inr()
             except ValueError as exc:
-                action, qty, skip_reason = "SKIP", 0.0, "insufficient_cash"
+                action, qty, skip_reason = "SKIP", 0.0, trade_block_skip_reason(exc)
                 logger.warning("Trailing stop sell blocked for %s: %s", ticker, exc)
 
         log_execution(
@@ -307,7 +314,7 @@ def decide_and_execute(
                 elif avg_entry > 0:
                     pnl = (price - avg_entry) * qty - sell_transaction_charge_inr()
         except ValueError as exc:
-            action, skip_reason = "SKIP", "insufficient_cash"
+            action, skip_reason = "SKIP", trade_block_skip_reason(exc)
             logger.warning("Trade blocked for %s: %s", ticker, exc)
 
     log_execution(
