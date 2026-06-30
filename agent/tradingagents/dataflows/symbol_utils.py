@@ -3,6 +3,8 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
+import yfinance as yf  # type: ignore[reportMissingImports]
+
 
 def normalize_symbol(symbol: str) -> str:
     """Normalize whitespace/case while preserving exchange suffixes like .NS."""
@@ -44,8 +46,6 @@ def resolve_instrument_identity(ticker: str) -> dict[str, str]:
     Identity is fail-open: recommendations should not hallucinate a company,
     but yfinance identity outages should not stop a run before data validation.
     """
-    import yfinance as yf
-
     symbol = normalize_symbol(ticker)
     if not symbol:
         return {}

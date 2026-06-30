@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 from typing import Any
 
+import yfinance as yf  # type: ignore[reportMissingImports]
+
 from .errors import StaleMarketDataError, VendorDataError
 from .symbol_utils import normalize_symbol
 
@@ -78,8 +80,6 @@ def verified_market_snapshot(
     VendorDataError
         If yfinance fails or returns missing/invalid market data.
     """
-    import yfinance as yf
-
     symbol = normalize_symbol(ticker)
     hist_period = period or os.getenv("YFINANCE_HISTORY_PERIOD", "1y")
     try:

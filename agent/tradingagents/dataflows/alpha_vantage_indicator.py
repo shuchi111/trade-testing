@@ -1,11 +1,12 @@
+from datetime import datetime
+
+from dateutil.relativedelta import relativedelta
+
 from .alpha_vantage_common import _make_api_request
 
 
 def get_indicator(symbol: str, indicator: str, curr_date: str, look_back_days: int,
                   interval: str = "daily", time_period: int = 14, series_type: str = "close") -> str:
-    from datetime import datetime
-    from dateutil.relativedelta import relativedelta
-
     indicator_map = {
         "close_50_sma": ("SMA", "50"),
         "close_200_sma": ("SMA", "200"),

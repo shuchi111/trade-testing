@@ -31,6 +31,8 @@ load_dotenv(SWING_TRADER_ROOT / ".env")
 import datetime as dt
 import psycopg2
 
+from db_url import resolve_psycopg2_url
+from market_date import ist_today
 from tradingagents.dataflows.market_data_validator import require_fresh_market_snapshot
 from write_recommendation_cache import run_single_recommendation
 
@@ -62,8 +64,6 @@ def main() -> None:
     ratio = _parse_refresh_ratio(os.getenv("PRICE_REFRESH_RATIO", "0.03"))
     max_age = _parse_max_age_days(os.getenv("MAX_CACHE_AGE_DAYS", "10"))
 
-    from db_url import resolve_psycopg2_url
-
     db_url = resolve_psycopg2_url()
     if not db_url:
         print("DIRECT_URL or DATABASE_URL missing", file=sys.stderr)
@@ -89,8 +89,6 @@ def main() -> None:
 
     refreshed_tickers: list[str] = []
     skipped_tickers: list[str] = []
-
-    from market_date import ist_today
 
     today = ist_today()
     today_str = today.strftime("%Y-%m-%d")
