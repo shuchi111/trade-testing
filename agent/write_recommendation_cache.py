@@ -37,10 +37,12 @@ SWING_TRADER_ROOT = ROOT.parent
 load_dotenv(SWING_TRADER_ROOT / ".env.local")
 load_dotenv(SWING_TRADER_ROOT / ".env")
 
-import psycopg2
+import psycopg2  # type: ignore[reportMissingModuleSource]
+import yfinance as yf  # type: ignore[reportMissingImports]
 
 from canonical_decision import resolve_canonical_decision
 from db_url import resolve_psycopg2_url
+from execute_ai_trades import decide_and_execute, load_settings
 from market_date import adjust_to_last_trading_day, ist_today
 from portfolio_db import build_analysis_context, load_holding
 from recommendation_bucket import recommendation_bucket
@@ -142,8 +144,6 @@ def _propagate_with_retry(
 
 def fetch_last_close(symbol: str, period: str | None = None) -> float | None:
     """Return last quoted close for ``symbol``: split-adjusted if available."""
-    import yfinance as yf
-
     hist_period = (
         (period.strip() if period else None)
         or os.getenv("YFINANCE_HISTORY_PERIOD", "").strip()
@@ -513,8 +513,6 @@ def run_single_recommendation(
         )
         if owns_conn and not source.startswith("circleci"):
             try:
-                from execute_ai_trades import decide_and_execute, load_settings
-
                 settings = load_settings(conn)
                 exec_out = decide_and_execute(
                     conn,

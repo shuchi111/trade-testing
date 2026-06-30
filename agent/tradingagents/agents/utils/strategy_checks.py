@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import pandas as pd
+import pandas as pd  # type: ignore[reportMissingImports]
+import yfinance as yf  # type: ignore[reportMissingImports]
 
 from tradingagents.dataflows.symbol_utils import normalize_symbol
 
@@ -52,8 +53,6 @@ def build_minervini_evidence(ticker: str, period: str = "1y") -> MinerviniEviden
         If real OHLCV data is unavailable, has fewer than 200 closes, or has an
         invalid latest close.
     """
-    import yfinance as yf
-
     symbol = normalize_symbol(ticker)
     hist = yf.Ticker(symbol).history(period=period)
     if hist is None or hist.empty or "Close" not in hist.columns:
