@@ -1012,6 +1012,100 @@ def _adjust_latest_sell_pnl(conn, ticker: str, charge: float) -> float | None:
     return float(row[0]) if row and row[0] is not None else None
 
 
+def _execute_sell_without_zero_holding_update(
+    conn,
+    *,
+    ticker: str,
+    quantity: float,
+    price: float,
+) -> None:
+    """Execute SELL without temporarily writing a zero holding quantity."""
+    total = quantity * price
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT avg_entry, quantity
+            FROM portfolio_holdings
+            WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s)
+            FOR UPDATE
+            """,
+            (ADMIN_WALLET_ID, ticker),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"No open position to sell for {ticker}")
+
+        avg_entry = float(row[0] or 0)
+        held_qty = float(row[1] or 0)
+        if quantity > held_qty:
+            raise ValueError(
+                f"Cannot sell {quantity:g} {ticker}; current holding is {held_qty:g}"
+            )
+
+        remaining_qty = held_qty - quantity
+        realized = (price - avg_entry) * quantity
+        cur.execute(
+            """
+            UPDATE wallet_accounts
+               SET current_cash = current_cash + %s, updated_at = now()
+             WHERE id = %s
+            RETURNING current_cash
+            """,
+            (total, ADMIN_WALLET_ID),
+        )
+        cash_row = cur.fetchone()
+        if not cash_row:
+            raise ValueError(f"Wallet not found: {ADMIN_WALLET_ID}")
+
+        if remaining_qty <= 0:
+            cur.execute(
+                "DELETE FROM portfolio_holdings WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s)",
+                (ADMIN_WALLET_ID, ticker),
+            )
+            cur.execute(
+                """
+                UPDATE portfolio_trailing_stops
+                   SET status = 'CANCELLED', closed_at = now(), updated_at = now()
+                 WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s) AND status = 'ACTIVE'
+                """,
+                (ADMIN_WALLET_ID, ticker),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE portfolio_holdings
+                   SET quantity = %s, updated_at = now()
+                 WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s)
+                """,
+                (remaining_qty, ADMIN_WALLET_ID, ticker),
+            )
+            cur.execute(
+                """
+                UPDATE portfolio_trailing_stops
+                   SET quantity = %s, updated_at = now()
+                 WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s) AND status = 'ACTIVE'
+                """,
+                (remaining_qty, ADMIN_WALLET_ID, ticker),
+            )
+
+        cur.execute(
+            """
+            INSERT INTO portfolio_trades (
+              wallet_id, ticker, action, quantity, price, total_value, realized_pnl
+            )
+            VALUES (%s, %s, 'SELL', %s, %s, %s, %s)
+            """,
+            (ADMIN_WALLET_ID, ticker, quantity, price, total, realized),
+        )
+        cur.execute(
+            """
+            INSERT INTO wallet_transactions (wallet_id, type, amount, balance_after, note)
+            VALUES (%s, 'SELL', %s, %s, %s)
+            """,
+            (ADMIN_WALLET_ID, total, cash_row[0], ticker),
+        )
+
+
 def execute_trade(conn, *, ticker: str, action: str, quantity: float, price: float) -> float | None:
     """
     Execute paper trade via ``execute_wallet_trade``.
@@ -1050,6 +1144,7 @@ def execute_trade(conn, *, ticker: str, action: str, quantity: float, price: flo
     """
     ticker = ticker.upper()
     charge = transaction_charge_for_action(action)
+    use_manual_sell = False
     if action == "BUY":
         cash = load_wallet_cash(conn)
         cost = quantity * price
@@ -1061,11 +1156,37 @@ def execute_trade(conn, *, ticker: str, action: str, quantity: float, price: flo
                 f"(trade {_fmt_inr(cost)} + charge {_fmt_inr(charge)}), "
                 f"have {_fmt_inr(cash)} and must keep {_fmt_inr(min_cash)}"
             )
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT execute_wallet_trade(%s::uuid, %s, %s, %s, %s)",
-            (ADMIN_WALLET_ID, ticker, action, quantity, price),
+    elif action == "SELL":
+        held_qty, _ = load_holding(conn, ticker)
+        if held_qty <= 0:
+            raise ValueError(f"No open position to sell for {ticker}")
+        if quantity > held_qty:
+            raise ValueError(
+                f"Cannot sell {quantity:g} {ticker}; current holding is {held_qty:g}"
+            )
+        use_manual_sell = (held_qty - quantity) <= 0.000001
+    if use_manual_sell:
+        _execute_sell_without_zero_holding_update(
+            conn, ticker=ticker, quantity=quantity, price=price
         )
+    else:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT execute_wallet_trade(%s::uuid, %s, %s, %s, %s)",
+                    (ADMIN_WALLET_ID, ticker, action, quantity, price),
+                )
+        except Exception as exc:
+            if action == "SELL" and (
+                "portfolio_holdings_quantity_check" in str(exc)
+                or "violates check constraint" in str(exc)
+            ):
+                conn.rollback()
+                _execute_sell_without_zero_holding_update(
+                    conn, ticker=ticker, quantity=quantity, price=price
+                )
+            else:
+                raise
     net_pnl: float | None = None
     if charge > 0:
         _deduct_transaction_charge(conn, ticker=ticker, action=action)
