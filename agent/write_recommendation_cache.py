@@ -40,7 +40,7 @@ load_dotenv(SWING_TRADER_ROOT / ".env")
 import psycopg2  # type: ignore[reportMissingModuleSource]
 import yfinance as yf  # type: ignore[reportMissingImports]
 
-from canonical_decision import resolve_canonical_decision
+from canonical_decision import coerce_decision_for_holdings, resolve_canonical_decision
 from db_url import resolve_psycopg2_url
 from execute_ai_trades import decide_and_execute, load_settings
 from market_date import adjust_to_last_trading_day, ist_today
@@ -511,6 +511,15 @@ def run_single_recommendation(
     owns_conn = db_conn is None
     conn = psycopg2.connect(db_url) if owns_conn else db_conn
     try:
+        try:
+            holding_quantity, holding_avg_entry = load_holding(conn, ticker)
+        except Exception as hold_err:
+            logger.warning(
+                "Could not reload holdings for %s from DB; using caller values: %s",
+                ticker,
+                hold_err,
+            )
+
         portfolio_context = _portfolio_context(
             conn,
             ticker,
@@ -533,10 +542,19 @@ def run_single_recommendation(
             return {"ok": False, "error": str(e), "ticker": ticker, "trade_date": trade_date}
 
         final_trade_decision = final_state.get("final_trade_decision") or ""
-        decision = resolve_canonical_decision(
+        raw_decision = resolve_canonical_decision(
             str(decision or ""),
             str(final_trade_decision),
         )
+        decision = coerce_decision_for_holdings(raw_decision, holding_quantity)
+        if decision != raw_decision:
+            logger.info(
+                "Coerced %s decision %r -> %r (no open position, qty=%s)",
+                ticker,
+                raw_decision,
+                decision,
+                holding_quantity,
+            )
         upsert_cache_row(
             conn,
             ticker=ticker,

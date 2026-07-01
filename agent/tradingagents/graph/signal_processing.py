@@ -4,6 +4,8 @@ import time
 
 from langchain_openai import ChatOpenAI
 
+from tradingagents.agents.utils.swing_policy import SWING_SIGNAL_EXTRACT_SYSTEM
+
 _ALLOWED = frozenset({"BUY", "OVERWEIGHT", "HOLD", "UNDERWEIGHT", "SELL"})
 _TOKEN_RE = re.compile(r"\b(BUY|OVERWEIGHT|HOLD|UNDERWEIGHT|SELL)\b", re.IGNORECASE)
 _RATING_LINE_RE = re.compile(
@@ -126,9 +128,7 @@ class SignalProcessor:
         messages = [
             (
                 "system",
-                "You are an efficient assistant that extracts the trading decision from analyst reports. "
-                "Extract the rating as exactly one of: BUY, OVERWEIGHT, HOLD, UNDERWEIGHT, SELL. "
-                "Output only the single rating word, nothing else.",
+                SWING_SIGNAL_EXTRACT_SYSTEM,
             ),
             ("human", full_signal),
         ]
