@@ -83,5 +83,19 @@ class DecideAndExecuteTests(unittest.TestCase):
         execute_ai_trades.execute_trade.assert_not_called()
 
 
+class TradeBlockSkipReasonTests(unittest.TestCase):
+    def test_no_open_position(self):
+        exc = ValueError("No open position to sell for TCS.NS")
+        self.assertEqual(execute_ai_trades.trade_block_skip_reason(exc), "no_position_to_sell")
+
+    def test_cannot_sell_oversize(self):
+        exc = ValueError("Cannot sell 10 TCS.NS; current holding is 5")
+        self.assertEqual(execute_ai_trades.trade_block_skip_reason(exc), "no_position_to_sell")
+
+    def test_insufficient_cash(self):
+        exc = ValueError("Insufficient cash: need 1,000.00")
+        self.assertEqual(execute_ai_trades.trade_block_skip_reason(exc), "insufficient_cash")
+
+
 if __name__ == "__main__":
     unittest.main()
