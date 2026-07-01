@@ -34,6 +34,7 @@ import psycopg2
 from db_url import resolve_psycopg2_url
 from market_date import ist_today
 from tradingagents.dataflows.market_data_validator import require_fresh_market_snapshot
+from portfolio_db import load_holding
 from write_recommendation_cache import run_single_recommendation
 
 
@@ -75,8 +76,7 @@ def main() -> None:
             cur.execute(
                 """
                 SELECT ticker, trade_date, reference_price,
-                       (computed_at AT TIME ZONE 'UTC')::date,
-                       holding_quantity, holding_avg_entry
+                       (computed_at AT TIME ZONE 'UTC')::date
                 FROM ai_recommendation_cache
                 ORDER BY ticker
                 """
@@ -99,8 +99,6 @@ def main() -> None:
             _stored_trade_date,
             ref_px,
             cache_day,
-            h_qty,
-            h_entry,
         ) in rows:
             try:
                 current = require_fresh_market_snapshot(ticker, today_str).latest_close
@@ -140,11 +138,20 @@ def main() -> None:
 
             print(f"[refresh_stale] {ticker}: {reason}", flush=True)
 
+            try:
+                h_qty, h_entry = load_holding(conn, ticker)
+            except Exception as hold_err:
+                print(
+                    f"[refresh_stale] FAIL {ticker}: could not load holdings: {hold_err}",
+                    file=sys.stderr,
+                )
+                continue
+
             result = run_single_recommendation(
                 ticker=ticker,
                 trade_date=today_str,
-                holding_quantity=float(h_qty or 0),
-                holding_avg_entry=float(h_entry or 0),
+                holding_quantity=float(h_qty),
+                holding_avg_entry=float(h_entry),
                 source="github_action_price_refresh",
                 debug=False,
                 db_conn=conn,
