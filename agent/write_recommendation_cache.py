@@ -201,6 +201,25 @@ def _first_number_match(text: str, patterns: list[str]) -> float | None:
     return None
 
 
+def _positive(value: float | None) -> float | None:
+    """Treat non-positive parsed levels as missing.
+
+    The LLM sometimes emits a literal ``0`` (or a negative) for target/stop when
+    a level is not applicable (e.g. a SELL/HOLD signal). A ``0`` is a valid
+    number to the regex but must NOT be stored: it silently defeats the 5% stop /
+    1.5R target fallback and inflates risk to ``entry - 0 = entry``. Returning
+    ``None`` here lets the fallback logic below apply, and prevents ``0`` from
+    ever being persisted.
+    """
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
 def _extract_signal_metrics(
     decision: str,
     final_trade_decision: str,
@@ -209,14 +228,16 @@ def _extract_signal_metrics(
     text = f"{decision or ''}\n{final_trade_decision or ''}"
     action = recommendation_bucket(decision).upper()
     entry = reference_price if reference_price and reference_price > 0 else None
-    target = _first_number_match(
+    # Positive-only: a parsed 0/negative is treated as "not found" so the
+    # fallbacks below apply and 0 is never stored.
+    target = _positive(_first_number_match(
         text,
         [r"\b(?:target|take\s*profit|tp)\s*(?:price)?\s*[:=@-]?\s*(?:₹|rs\.?|inr)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)"],
-    )
-    stop = _first_number_match(
+    ))
+    stop = _positive(_first_number_match(
         text,
         [r"\b(?:stop\s*loss|stoploss|stop|sl)\s*(?:price)?\s*[:=@-]?\s*(?:₹|rs\.?|inr)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)"],
-    )
+    ))
     confidence = _first_number_match(
         text,
         [
