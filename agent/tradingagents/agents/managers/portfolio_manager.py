@@ -78,16 +78,21 @@ def create_portfolio_manager(llm: Any, memory: Any) -> Callable[[dict[str, Any]]
         prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and \
 deliver the final trading decision.
 
+{SWING_MANAGERS_BLOCK}
+
 {instrument_context}
 
 ---
 
 Rating scale — use exactly one word for the Rating line (capitalized exactly as written):
-Buy: Strong conviction to enter or add
-Overweight: Favorable outlook, increase gradually
-Hold: Maintain, no churn this week unless thesis broke
-Underweight: Reduce partly
-Sell: Exit or avoid entry
+Buy: Strong conviction to enter or add (only when not already fully sized)
+Overweight: Favorable outlook, increase gradually when room under cap
+Hold: Maintain, wait, or express bearish / avoid-entry view when no shares are held
+Underweight: Reduce partly — only when an open position exists in portfolio context
+Sell: Exit an open position fully — only when quantity held is greater than zero
+
+Mandatory position rule: if CURRENT TICKER FOCUS or holdings summary shows no open \
+position in this name, never use Sell or Underweight. Use Hold instead.
 
 Context (must weight all of this; holdings define basis for percent math when applicable):
 Current position and holdings summary: {portfolio_context}
@@ -98,9 +103,11 @@ Lessons from past decisions: {past_memory_str}
 1. **Rating**: State one of Buy / Overweight / Hold / Underweight / Sell.
 2. **Executive Summary**: A concise action plan covering entry strategy, position \
    sizing, key risk levels, and time horizon.
-3. **Investment Thesis**: Detailed reasoning anchored in the analysts' debate and past \
+3. **Portfolio and wallet observations**: What wallet cash, holdings, cap room, \
+   active stops, live trades, and backtests imply for this rating.
+4. **Investment Thesis**: Detailed reasoning anchored in the analysts' debate and past \
 reflections.
-4. **Backtest and live trade review**: What backtest results and live trade history imply.
+5. **Backtest and live trade review**: What backtest results and live trade history imply.
 
 Rating: Buy | Overweight | Hold | Underweight | Sell
 
@@ -110,6 +117,12 @@ Entry strategy: prose (add / trim / wait; levels in words if helpful).
 Position sizing: prose (how heavy or light; respect swing, holdings basis, and the twenty-five thousand INR cap).
 Key risk levels: prose (including the mandatory 5% trailing stop, wallet reserve, and thesis-break ideas).
 Time horizon: prose (multi-week swing; not day-trade framing).
+
+Portfolio and wallet observations:
+Position status: state held quantity, average entry, days held, or explicitly confirm no open position.
+Wallet and cap: cash, reserve, exposure, and room to add under the twenty-five thousand INR cap.
+Risk controls: active or required 5% trailing stop and whether the rating increases or reduces risk.
+Evidence check: how recent live trades, backtests, past AI recommendations, and holding P&L support or contradict the action.
 
 Investment thesis: detailed reasoning in one or more paragraphs anchored in the debate, fundamentals, and market context; explicitly tie to holdings and average entry when provided.
 
@@ -125,7 +138,7 @@ Risk/reward ratio: numeric ratio using target reward divided by stop risk (examp
 
 AI confidence: percentage from 0% to 100% and one short reason.
 
-When you write the final answer, reproduce the section labels above verbatim (Rating:, Executive summary:, then Action plan:, Entry strategy:, Position sizing:, Key risk levels:, Time horizon:, then Investment thesis:, Backtest and live trade review:, Weekly candles tie-in:, GTT target price:, GTT stop price:, Risk/reward ratio:, AI confidence:) and fill in real content—do not leave the template placeholders.
+When you write the final answer, reproduce the section labels above verbatim (Rating:, Executive summary:, then Action plan:, Entry strategy:, Position sizing:, Key risk levels:, Time horizon:, then Portfolio and wallet observations:, Position status:, Wallet and cap:, Risk controls:, Evidence check:, then Investment thesis:, Backtest and live trade review:, Weekly candles tie-in:, GTT target price:, GTT stop price:, Risk/reward ratio:, AI confidence:) and fill in real content—do not leave the template placeholders.
 
 Risk Analysts Debate History:
 {history}
