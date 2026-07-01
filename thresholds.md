@@ -191,7 +191,7 @@ API keys (`Z_API_KEY`, `GLM_API_KEY`, etc.) must be set in CircleCI Project Sett
 | Schedule | CircleCI UI schedule: Mon–Fri **06:00 UTC** = **11:30 IST** (`0 6 * * 1-5`) |
 | Branch | `main` only (on schedule trigger) |
 | Batch shards | **6** shard jobs (`shard_total: 6`) |
-| Expected tickers | **22** from `RECOMMENDATION_TICKERS` |
+| Expected tickers | **30** from `RECOMMENDATION_TICKERS` |
 | Python image | `cimg/python:3.12` |
 | Job timeouts | batch **50m**, execute **30m**, price refresh **60m** |
 
@@ -217,12 +217,12 @@ There is **no** default workflow without a `when` clause, so push does **not** r
 
 ## Tickers
 
-**22 symbols** — not hardcoded in Python. Set via:
+**30 symbols** — not hardcoded in Python. Set via:
 
 - CircleCI secret: `RECOMMENDATION_TICKERS`
 - Local: `.env` (see `env.example`)
 
-List in `env.example`: 20 NSE names + `BTC-USD` + `ETH-USD`.
+List in `env.example`: 28 NSE names + `BTC-USD` + `ETH-USD`.
 
 ---
 

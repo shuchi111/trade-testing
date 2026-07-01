@@ -37,10 +37,12 @@ SWING_TRADER_ROOT = ROOT.parent
 load_dotenv(SWING_TRADER_ROOT / ".env.local")
 load_dotenv(SWING_TRADER_ROOT / ".env")
 
-import psycopg2
+import psycopg2  # type: ignore[reportMissingModuleSource]
+import yfinance as yf  # type: ignore[reportMissingImports]
 
 from canonical_decision import resolve_canonical_decision
 from db_url import resolve_psycopg2_url
+from execute_ai_trades import decide_and_execute, load_settings
 from market_date import adjust_to_last_trading_day, ist_today
 from portfolio_db import build_analysis_context, load_holding
 from recommendation_bucket import recommendation_bucket
@@ -142,8 +144,6 @@ def _propagate_with_retry(
 
 def fetch_last_close(symbol: str, period: str | None = None) -> float | None:
     """Return last quoted close for ``symbol``: split-adjusted if available."""
-    import yfinance as yf
-
     hist_period = (
         (period.strip() if period else None)
         or os.getenv("YFINANCE_HISTORY_PERIOD", "").strip()
@@ -201,6 +201,41 @@ def _first_number_match(text: str, patterns: list[str]) -> float | None:
     return None
 
 
+def _positive(value: float | None) -> float | None:
+    """Return ``value`` when strictly positive; otherwise treat as missing.
+
+    Parameters
+    ----------
+    value
+        Parsed target/stop level from LLM output, or ``None``.
+
+    Returns
+    -------
+    float | None
+        The input when ``value > 0``; otherwise ``None`` so fallback logic applies
+        and zero/negative levels are never persisted.
+
+    Raises
+    ------
+    None
+        Non-numeric inputs are coerced via ``float()``; ``TypeError`` and
+        ``ValueError`` from coercion return ``None`` instead of raising.
+
+    Notes
+    -----
+    A literal ``0`` is valid to the regex but must not be stored: it silently
+    defeats the 5% stop / 1.5R target fallback and inflates risk to
+    ``entry - 0 = entry``.
+    """
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
 def _extract_signal_metrics(
     decision: str,
     final_trade_decision: str,
@@ -209,14 +244,16 @@ def _extract_signal_metrics(
     text = f"{decision or ''}\n{final_trade_decision or ''}"
     action = recommendation_bucket(decision).upper()
     entry = reference_price if reference_price and reference_price > 0 else None
-    target = _first_number_match(
+    # Positive-only: a parsed 0/negative is treated as "not found" so the
+    # fallbacks below apply and 0 is never stored.
+    target = _positive(_first_number_match(
         text,
         [r"\b(?:target|take\s*profit|tp)\s*(?:price)?\s*[:=@-]?\s*(?:₹|rs\.?|inr)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)"],
-    )
-    stop = _first_number_match(
+    ))
+    stop = _positive(_first_number_match(
         text,
         [r"\b(?:stop\s*loss|stoploss|stop|sl)\s*(?:price)?\s*[:=@-]?\s*(?:₹|rs\.?|inr)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)"],
-    )
+    ))
     confidence = _first_number_match(
         text,
         [
@@ -513,8 +550,6 @@ def run_single_recommendation(
         )
         if owns_conn and not source.startswith("circleci"):
             try:
-                from execute_ai_trades import decide_and_execute, load_settings
-
                 settings = load_settings(conn)
                 exec_out = decide_and_execute(
                     conn,

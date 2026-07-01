@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 from .alpha_vantage_common import _make_api_request, format_datetime_for_api
 
 
@@ -11,7 +13,6 @@ def get_news(ticker, start_date, end_date):
 
 
 def get_global_news(curr_date, look_back_days: int = 7, limit: int = 50):
-    from datetime import datetime, timedelta
     curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     start_date = (curr_dt - timedelta(days=look_back_days)).strftime("%Y-%m-%d")
     params = {
