@@ -2,7 +2,30 @@
 
 from __future__ import annotations
 
+from recommendation_bucket import recommendation_bucket
 from tradingagents.graph.signal_processing import coerce_decision_token
+
+_QUANTITY_EPSILON = 1e-6
+
+
+def coerce_decision_for_holdings(
+    decision: str | None,
+    holding_quantity: float,
+    *,
+    quantity_epsilon: float = _QUANTITY_EPSILON,
+) -> str:
+    """
+    Downgrade exit ratings when there is no open position to trim or sell.
+
+    SELL and UNDERWEIGHT require an existing holding; bearish no-position views
+    should surface as HOLD in cache and UI.
+    """
+    token = (decision or "").strip().upper() or "HOLD"
+    if holding_quantity > quantity_epsilon:
+        return token
+    if recommendation_bucket(token) == "sell":
+        return "HOLD"
+    return token
 
 
 def resolve_canonical_decision(

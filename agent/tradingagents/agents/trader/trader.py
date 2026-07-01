@@ -97,7 +97,10 @@ def create_trader(llm: Any, memory: Any) -> Callable[[dict[str, Any]], dict[str,
                     "basis when quantities and average entry are given.\n"
                     "Current position and holdings: "
                     f"{portfolio_context}\nPast reflections:\n{past_memory_str}\n\n"
-                    "Give one recommendation tied to ONE decision for the WEEK. End with a line exactly: "
+                    "Give one recommendation tied to ONE decision for the WEEK. "
+                    "If portfolio context shows no open position for this ticker, "
+                    "do not propose SELL or UNDERWEIGHT; use HOLD for bearish views. "
+                    "End with a line exactly: "
                     "FINAL TRANSACTION PROPOSAL: one of BUY / OVERWEIGHT / HOLD / UNDERWEIGHT / SELL "
                     "(capitalized, single phrase after the colon)."
                 ),

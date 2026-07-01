@@ -16,6 +16,7 @@ from tradingagents.agents.utils.news_data_tools import (
     get_global_news,
 )
 from tradingagents.dataflows.symbol_utils import resolve_instrument_identity
+from tradingagents.agents.utils.swing_policy import SWING_INSTRUMENT_IDENTITY_SUFFIX
 
 
 def langchain_tools(tools: list) -> list[BaseTool]:
@@ -74,8 +75,8 @@ def build_instrument_context(ticker: str, identity: dict | None = None) -> str:
             details.append(f"Currency: {identity['currency']}")
     if details:
         context += (
-            f" Resolved identity: {'; '.join(details)}. "
-            "Do not substitute a different company or ticker unless a tool result explicitly disproves this identity."
+            f" Resolved identity: {'; '.join(details)}."
+            f"{SWING_INSTRUMENT_IDENTITY_SUFFIX}"
         )
     return context
 
