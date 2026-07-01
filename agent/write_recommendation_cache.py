@@ -202,14 +202,30 @@ def _first_number_match(text: str, patterns: list[str]) -> float | None:
 
 
 def _positive(value: float | None) -> float | None:
-    """Treat non-positive parsed levels as missing.
+    """Return ``value`` when strictly positive; otherwise treat as missing.
 
-    The LLM sometimes emits a literal ``0`` (or a negative) for target/stop when
-    a level is not applicable (e.g. a SELL/HOLD signal). A ``0`` is a valid
-    number to the regex but must NOT be stored: it silently defeats the 5% stop /
-    1.5R target fallback and inflates risk to ``entry - 0 = entry``. Returning
-    ``None`` here lets the fallback logic below apply, and prevents ``0`` from
-    ever being persisted.
+    Parameters
+    ----------
+    value
+        Parsed target/stop level from LLM output, or ``None``.
+
+    Returns
+    -------
+    float | None
+        The input when ``value > 0``; otherwise ``None`` so fallback logic applies
+        and zero/negative levels are never persisted.
+
+    Raises
+    ------
+    None
+        Non-numeric inputs are coerced via ``float()``; ``TypeError`` and
+        ``ValueError`` from coercion return ``None`` instead of raising.
+
+    Notes
+    -----
+    A literal ``0`` is valid to the regex but must not be stored: it silently
+    defeats the 5% stop / 1.5R target fallback and inflates risk to
+    ``entry - 0 = entry``.
     """
     if value is None:
         return None
