@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Full batch: loops RECOMMENDATION_TICKERS (22). Uses agent/ in this repo.
+# Full batch: loops RECOMMENDATION_TICKERS (30). Uses agent/ in this repo.
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -139,6 +139,6 @@ if [ "${OK}" -eq 0 ] && [ "${COUNT}" -gt 0 ]; then
   exit 1
 fi
 
-if [ "${COUNT}" -ne 22 ] && [ -z "${override}" ] && [ "${shard_total}" -le 1 ]; then
-  echo "WARN: Expected 22 tickers but got ${COUNT}. Check RECOMMENDATION_TICKERS."
+if [ "${COUNT}" -ne 30 ] && [ -z "${override}" ] && [ "${shard_total}" -le 1 ]; then
+  echo "WARN: Expected 30 tickers but got ${COUNT}. Check RECOMMENDATION_TICKERS."
 fi

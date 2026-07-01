@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Trigger full batch (all 22 tickers) on CircleCI.
+# Trigger full batch (all 30 tickers) on CircleCI.
 #
 #   export CIRCLECI_TOKEN=your-personal-api-token
 #   export CIRCLE_PROJECT_SLUG=gh/YOUR_USER/swing-trader-circleci-cron

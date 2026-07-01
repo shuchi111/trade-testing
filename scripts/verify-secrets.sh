@@ -23,7 +23,7 @@ esac
 
 if [ "${mode}" = "batch" ] || [ "${mode}" = "both" ]; then
   if [ -z "${override}" ] && [ -z "${tickers_secret}" ]; then
-    echo "ERROR: Set RECOMMENDATION_TICKERS (all 22 — see tickers.example.txt)."
+    echo "ERROR: Set RECOMMENDATION_TICKERS (all 30 — see env.example)."
     errors=$((errors + 1))
   fi
 fi
