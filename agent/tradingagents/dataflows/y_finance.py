@@ -1,7 +1,8 @@
-from typing import Annotated
-from datetime import datetime
-from dateutil.relativedelta import relativedelta
 import os
+from datetime import datetime
+from typing import Annotated
+
+from dateutil.relativedelta import relativedelta
 import pandas as pd  # type: ignore[reportMissingImports]
 from stockstats import wrap  # type: ignore[reportMissingImports]
 import yfinance as yf  # type: ignore[reportMissingImports]
