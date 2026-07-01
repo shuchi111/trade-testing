@@ -16,6 +16,8 @@ from trading_constraints import (
 )
 
 ADMIN_WALLET_ID = "00000000-0000-0000-0000-000000000001"
+# Fractional-share float noise: treat remainder at or below this as a full exit.
+QUANTITY_EPSILON = 1e-6
 logger = logging.getLogger(__name__)
 
 
@@ -1012,6 +1014,23 @@ def _adjust_latest_sell_pnl(conn, ticker: str, charge: float) -> float | None:
     return float(row[0]) if row and row[0] is not None else None
 
 
+def _is_holding_quantity_check_violation(exc: BaseException) -> bool:
+    """Return True when a SELL failed because holdings quantity would go negative."""
+    try:
+        from psycopg2.errors import CheckViolation
+    except ImportError:
+        CheckViolation = ()  # type: ignore[misc, assignment]
+
+    if isinstance(exc, CheckViolation):
+        return True
+
+    message = str(exc).lower()
+    return (
+        "portfolio_holdings_quantity_check" in message
+        or "violates check constraint" in message
+    )
+
+
 def _execute_sell_without_zero_holding_update(
     conn,
     *,
@@ -1019,7 +1038,42 @@ def _execute_sell_without_zero_holding_update(
     quantity: float,
     price: float,
 ) -> None:
-    """Execute SELL without temporarily writing a zero holding quantity."""
+    """Execute a full or partial SELL without writing a zero holding quantity.
+
+    Used when selling the entire position (or leaving only float noise) so the
+    DB ``portfolio_holdings_quantity_check`` constraint is never tripped by a
+    transient ``quantity = 0`` update.
+
+    Parameters
+    ----------
+    conn
+        Open psycopg2 connection; caller must commit or rollback.
+    ticker
+        Exchange-qualified instrument symbol.
+    quantity
+        Share quantity to sell; must not exceed the current holding.
+    price
+        Execution reference price per share.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    ValueError
+        If there is no open position or ``quantity`` exceeds the held amount.
+
+    Notes
+    -----
+    Holds the ``portfolio_holdings`` row with ``FOR UPDATE``. On a full exit,
+    deletes the holding and cancels active trailing stops instead of setting
+    quantity to zero.
+
+    ``realized_pnl`` is stored as gross ``(price - avg_entry) * quantity``.
+    Callers (``execute_trade``) net the sell-leg charge via
+    ``_adjust_latest_sell_pnl``, matching the ``execute_wallet_trade`` path.
+    """
     total = quantity * price
     with conn.cursor() as cur:
         cur.execute(
@@ -1164,7 +1218,7 @@ def execute_trade(conn, *, ticker: str, action: str, quantity: float, price: flo
             raise ValueError(
                 f"Cannot sell {quantity:g} {ticker}; current holding is {held_qty:g}"
             )
-        use_manual_sell = (held_qty - quantity) <= 0.000001
+        use_manual_sell = (held_qty - quantity) <= QUANTITY_EPSILON
     if use_manual_sell:
         _execute_sell_without_zero_holding_update(
             conn, ticker=ticker, quantity=quantity, price=price
@@ -1177,10 +1231,7 @@ def execute_trade(conn, *, ticker: str, action: str, quantity: float, price: flo
                     (ADMIN_WALLET_ID, ticker, action, quantity, price),
                 )
         except Exception as exc:
-            if action == "SELL" and (
-                "portfolio_holdings_quantity_check" in str(exc)
-                or "violates check constraint" in str(exc)
-            ):
+            if action == "SELL" and _is_holding_quantity_check_violation(exc):
                 conn.rollback()
                 _execute_sell_without_zero_holding_update(
                     conn, ticker=ticker, quantity=quantity, price=price

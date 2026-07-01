@@ -57,6 +57,26 @@ SETTINGS_ID = "00000000-0000-0000-0000-000000000002"
 
 
 def trade_block_skip_reason(exc: ValueError) -> str:
+    """Map a trade-blocking ``ValueError`` to a stable skip-reason code.
+
+    Parameters
+    ----------
+    exc
+        Raised when a SELL/BUY cannot proceed (e.g. no position, insufficient cash).
+
+    Returns
+    -------
+    str
+        ``"no_position_to_sell"`` when the message indicates no holding or an
+        oversize sell; otherwise ``"insufficient_cash"``.
+
+    Examples
+    --------
+    >>> trade_block_skip_reason(ValueError("No open position to sell for TCS.NS"))
+    'no_position_to_sell'
+    >>> trade_block_skip_reason(ValueError("Insufficient cash: need 1000"))
+    'insufficient_cash'
+    """
     message = str(exc).lower()
     if "no open position" in message or "cannot sell" in message:
         return "no_position_to_sell"
