@@ -20,6 +20,9 @@ class DecideAndExecuteTests(unittest.TestCase):
     def _patch_common_dependencies(self, *, reference_price: float | None, cash: float):
         logged: list[dict] = []
 
+        def _mock_snapshot(*_args, **_kwargs):
+            return types.SimpleNamespace(latest_close=reference_price)
+
         patches = [
             patch.object(execute_ai_trades, "already_executed", return_value=False),
             patch.object(
@@ -32,6 +35,7 @@ class DecideAndExecuteTests(unittest.TestCase):
                     "reference_price": reference_price,
                 },
             ),
+            patch.object(execute_ai_trades, "require_fresh_market_snapshot", side_effect=_mock_snapshot),
             patch.object(execute_ai_trades, "resolve_canonical_decision", return_value="BUY"),
             patch.object(execute_ai_trades, "recommendation_bucket", return_value="buy"),
             patch.object(execute_ai_trades, "is_overweight", return_value=False),
