@@ -1,8 +1,12 @@
-from typing import Annotated
-from datetime import datetime
-from dateutil.relativedelta import relativedelta
-import yfinance as yf
 import os
+from datetime import datetime
+from typing import Annotated
+
+from dateutil.relativedelta import relativedelta
+import pandas as pd  # type: ignore[reportMissingImports]
+from stockstats import wrap  # type: ignore[reportMissingImports]
+import yfinance as yf  # type: ignore[reportMissingImports]
+from .config import get_config
 from .stockstats_utils import StockstatsUtils, _clean_dataframe, yf_retry, _cache_date_range
 
 
@@ -98,11 +102,6 @@ def get_stock_stats_indicators_window(
 
 
 def _get_stock_stats_bulk(symbol, indicator, curr_date) -> dict:
-    from .config import get_config
-    import pandas as pd
-    from stockstats import wrap
-    import os
-
     config = get_config()
     online = config["data_vendors"]["technical_indicators"] != "local"
 

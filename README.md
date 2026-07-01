@@ -1,6 +1,6 @@
 # trade-circleci-cron
 
-Daily AI recommendations for 22 tickers via GitHub Actions.
+Daily AI recommendations for 30 tickers via GitHub Actions.
 
 ## Thresholds & defaults
 

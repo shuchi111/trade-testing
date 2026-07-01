@@ -3,12 +3,12 @@ version: 2.1
 
 parameters:
   mode:
-    description: batch = all 22 tickers | price_refresh = stale rows | both
+    description: batch = all 30 tickers | price_refresh = stale rows | both
     type: enum
     enum: ["batch", "price_refresh", "both"]
     default: batch
   tickers_override:
-    description: Optional comma-separated tickers (smoke test only). Empty = RECOMMENDATION_TICKERS (22).
+    description: Optional comma-separated tickers (smoke test only). Empty = RECOMMENDATION_TICKERS (30).
     type: string
     default: ""
   trade_date:
