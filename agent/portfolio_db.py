@@ -14,6 +14,10 @@ from trading_constraints import (
     swing_exit_window_days,
     transaction_charge_for_action,
 )
+from tradingagents.agents.utils.swing_policy import (
+    SWING_CONTEXT_PREAMBLE,
+    format_mandatory_rules,
+)
 
 ADMIN_WALLET_ID = "00000000-0000-0000-0000-000000000001"
 # Fractional-share float noise: treat remainder at or below this as a full exit.
@@ -705,8 +709,7 @@ def build_analysis_context(
     held_days = days_held(conn, ticker, as_of)
 
     lines: list[str] = [
-        "=== WEBSITE CONTEXT COVERAGE ===",
-        "Use every section below as if reviewing the website tabs before deciding: wallet, holdings, holding dates, live trades, backtests, prior AI history, active stops, and mandatory rules.",
+        SWING_CONTEXT_PREAMBLE,
         "",
         "=== LIVE PORTFOLIO ===",
     ]
@@ -922,26 +925,12 @@ def build_analysis_context(
         lines.append("No prior AI recommendation history.")
 
     lines.append("")
-    lines.append("=== MANDATORY TRADING RULES (executor enforces these) ===")
-    lines.append(f"- Maximum {_fmt_inr(cap)} invested per stock (including adds).")
     lines.append(
-        f"- Every live BUY has a mandatory {trailing_pct:.0f}% trailing stop; executor sells if LTP breaches it."
-    )
-    lines.append("- Wallet cash must never go negative; size buys within available cash.")
-    lines.append(
-        f"- Aim to harvest the best risk-adjusted exit within {exit_window_days} calendar days, "
-        "using backtests, live trade history, weekly structure, and current profit."
-    )
-    lines.append(
-        f"- The 90-day window is not a forced sell date; SELL/UNDERWEIGHT is allowed earlier "
-        f"when analysis indicates peak profit or thesis-break risk."
-    )
-    lines.append(
-        "- Before recommending SELL, review live trade history and backtest trade dates above; "
-        "do not churn like losing backtest strategies with many small whipsaw trades."
-    )
-    lines.append(
-        "- Analyse deeply: tie Rating to backtest evidence, live hold duration, and past AI stance consistency."
+        format_mandatory_rules(
+            cap_inr=_fmt_inr(cap),
+            trailing_pct=trailing_pct,
+            exit_window_days=exit_window_days,
+        )
     )
 
     return "\n".join(lines)
