@@ -33,6 +33,12 @@ import psycopg2
 
 from canonical_decision import resolve_canonical_decision
 from db_url import resolve_psycopg2_url
+from instrument_policy import (
+    is_fractional_ticker,
+    min_buy_notional_inr,
+    quote_to_inr,
+    size_buy_quantity,
+)
 from market_date import market_trade_date
 from tradingagents.dataflows.market_data_validator import require_fresh_market_snapshot
 from portfolio_db import (
@@ -130,16 +136,45 @@ def latest_recommendation(conn, ticker: str, trade_date: str) -> dict | None:
     }
 
 
-def already_executed(conn, ticker: str, trade_date: str, dry_run: bool) -> bool:
+def load_prior_execution(conn, ticker: str, trade_date: str, dry_run: bool) -> dict | None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT 1 FROM ai_trade_executions
+            SELECT recommendation_id, action_taken, decision
+            FROM ai_trade_executions
             WHERE UPPER(ticker) = UPPER(%s) AND trade_date = %s::date AND dry_run = %s
             """,
             (ticker, trade_date, dry_run),
         )
-        return cur.fetchone() is not None
+        row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "recommendation_id": str(row[0]) if row[0] else None,
+        "action_taken": row[1] or "",
+        "decision": row[2] or "",
+    }
+
+
+def should_skip_idempotent(
+    prior: dict | None,
+    *,
+    current_reco_id: str,
+    current_decision: str,
+) -> bool:
+    """Skip only when today's run already acted on this exact recommendation."""
+    if not prior:
+        return False
+    prior_id = prior.get("recommendation_id")
+    prior_action = prior.get("action_taken") or ""
+    prior_decision = (prior.get("decision") or "").strip()
+    decision = (current_decision or "").strip()
+
+    if prior_id and prior_id == current_reco_id:
+        return True
+    if prior_action in ("BUY", "SELL") and prior_decision == decision:
+        return True
+    return False
 
 
 def log_execution(conn, *, ticker, trade_date, decision, action, qty, price, pnl,
@@ -187,9 +222,6 @@ def decide_and_execute(
     force: bool = False,
 ) -> dict:
     ticker = ticker.strip().upper()
-    if not force and already_executed(conn, ticker, trade_date, dry_run):
-        return {"ok": True, "ticker": ticker, "action_taken": "SKIP", "skip_reason": "already_executed"}
-
     reco = latest_recommendation(conn, ticker, trade_date)
     if not reco:
         log_execution(
@@ -198,6 +230,21 @@ def decide_and_execute(
             recommendation_id=None, skip_reason="no_recommendation", dry_run=dry_run,
         )
         return {"ok": True, "ticker": ticker, "action_taken": "SKIP", "skip_reason": "no_recommendation"}
+
+    if not force:
+        prior = load_prior_execution(conn, ticker, trade_date, dry_run)
+        if should_skip_idempotent(
+            prior,
+            current_reco_id=reco["id"],
+            current_decision=reco["decision"],
+        ):
+            return {
+                "ok": True,
+                "ticker": ticker,
+                "decision": reco["decision"],
+                "action_taken": "SKIP",
+                "skip_reason": "already_executed",
+            }
 
     decision = resolve_canonical_decision(
         reco["decision"],
@@ -215,7 +262,8 @@ def decide_and_execute(
         )
         return {"ok": True, "ticker": ticker, "action_taken": "SKIP", "skip_reason": "stale_market_data"}
 
-    price = reco["reference_price"] or snapshot.latest_close
+    quote_price = reco["reference_price"] or snapshot.latest_close
+    price = quote_to_inr(ticker, quote_price, getattr(snapshot, "currency", None))
     if not price or price <= 0:
         log_execution(
             conn, ticker=ticker, trade_date=trade_date, decision=decision,
@@ -273,7 +321,8 @@ def decide_and_execute(
     action = "HOLD"
     qty = 0.0
     skip_reason = None
-    size_mult = 1.0 if not is_overweight(decision) else 1.0
+    fractional = is_fractional_ticker(ticker)
+    min_notional = min_buy_notional_inr(ticker)
 
     current_position_value = hold_qty * price
     room_to_cap = max(0.0, max_inr - current_position_value)
@@ -281,7 +330,9 @@ def decide_and_execute(
     if bucket == "buy":
         if hold_qty > 0 and not is_overweight(decision):
             action, skip_reason = "SKIP", "already_holding_no_overweight"
-        elif room_to_cap < price:
+        elif not fractional and room_to_cap < price:
+            action, skip_reason = "SKIP", "max_position_cap_reached"
+        elif fractional and room_to_cap < min_notional:
             action, skip_reason = "SKIP", "max_position_cap_reached"
         elif cash <= 0:
             action, skip_reason = "SKIP", "insufficient_cash"
@@ -292,18 +343,38 @@ def decide_and_execute(
             else:
                 cash_for_trade = max(0.0, cash - buy_charge - min_cash_inr)
                 buy_value = min(cash_for_trade, room_to_cap)
-                if buy_value < price:
+                if fractional and buy_value < min_notional:
+                    action, skip_reason = "SKIP", "below_min_crypto_notional"
+                elif not fractional and buy_value < price:
                     action, skip_reason = "SKIP", "insufficient_cash_for_whole_share"
                 else:
-                    qty = int(buy_value // price)
+                    qty = size_buy_quantity(
+                        buy_value_inr=buy_value,
+                        price_inr=price,
+                        fractional=fractional,
+                    )
                     cost = qty * price
                     if qty <= 0:
-                        action, skip_reason = "SKIP", "insufficient_cash_for_whole_share"
+                        skip = (
+                            "below_min_crypto_notional"
+                            if fractional
+                            else "insufficient_cash_for_whole_share"
+                        )
+                        action, skip_reason = "SKIP", skip
                     elif cost + buy_charge + min_cash_inr > cash:
-                        qty = int((cash - buy_charge - min_cash_inr) // price)
+                        qty = size_buy_quantity(
+                            buy_value_inr=max(0.0, cash - buy_charge - min_cash_inr),
+                            price_inr=price,
+                            fractional=fractional,
+                        )
                         cost = qty * price
                         if qty <= 0:
-                            action, skip_reason = "SKIP", "insufficient_cash_for_whole_share"
+                            skip = (
+                                "below_min_crypto_notional"
+                                if fractional
+                                else "insufficient_cash_for_whole_share"
+                            )
+                            action, skip_reason = "SKIP", skip
                         else:
                             action = "BUY"
                     else:

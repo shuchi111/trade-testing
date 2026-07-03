@@ -12,6 +12,7 @@ AGENT_DIR = Path(__file__).resolve().parents[1] / "agent"
 if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
 
+from tradingagents.agents.utils import strategy_checks
 from tradingagents.agents.utils.strategy_checks import build_minervini_evidence
 
 
@@ -23,7 +24,8 @@ def _install_yfinance_stub(history: pd.DataFrame):
         def history(self, period: str):
             return history
 
-    return patch.dict(sys.modules, {"yfinance": types.SimpleNamespace(Ticker=FakeTicker)})
+    fake_yf = types.SimpleNamespace(Ticker=FakeTicker)
+    return patch.object(strategy_checks, "yf", fake_yf)
 
 
 class StrategyChecksTests(unittest.TestCase):

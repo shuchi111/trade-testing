@@ -13,6 +13,7 @@ if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
 
 from tradingagents.dataflows.errors import StaleMarketDataError
+from tradingagents.dataflows import market_data_validator
 from tradingagents.dataflows.market_data_validator import (
     format_market_snapshot,
     require_fresh_market_snapshot,
@@ -30,7 +31,8 @@ def _install_yfinance_stub(history: pd.DataFrame):
         def history(self, period: str):
             return history
 
-    return patch.dict(sys.modules, {"yfinance": types.SimpleNamespace(Ticker=FakeTicker)})
+    fake_yf = types.SimpleNamespace(Ticker=FakeTicker)
+    return patch.object(market_data_validator, "yf", fake_yf)
 
 
 class MarketDataValidatorTests(unittest.TestCase):
