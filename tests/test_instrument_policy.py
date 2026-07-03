@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 AGENT_DIR = Path(__file__).resolve().parents[1] / "agent"
 if str(AGENT_DIR) not in sys.path:
@@ -18,7 +19,7 @@ class InstrumentPolicyTests(unittest.TestCase):
         self.assertFalse(instrument_policy.is_fractional_ticker("TCS.NS"))
 
     def test_quote_to_inr_crypto(self):
-        with unittest.mock.patch.object(instrument_policy, "usd_inr_rate", return_value=80.0):
+        with mock.patch.object(instrument_policy, "usd_inr_rate", return_value=80.0):
             self.assertEqual(
                 instrument_policy.quote_to_inr("BTC-USD", 1000.0, "USD"),
                 80_000.0,
@@ -45,6 +46,25 @@ class InstrumentPolicyTests(unittest.TestCase):
             fractional=False,
         )
         self.assertEqual(qty, 3.0)
+
+    def test_usd_inr_rate_refreshes_after_ttl(self):
+        instrument_policy.clear_usd_inr_rate_cache()
+        with mock.patch.object(
+            instrument_policy, "_fetch_usd_inr_rate", side_effect=[80.0, 81.0]
+        ) as fetch:
+            with mock.patch.object(
+                instrument_policy, "usd_inr_cache_ttl_sec", return_value=60.0
+            ):
+                first = instrument_policy.usd_inr_rate()
+                second = instrument_policy.usd_inr_rate()
+                instrument_policy._usd_inr_cache = (80.0, 0.0)
+                third = instrument_policy.usd_inr_rate()
+
+        self.assertEqual(first, 80.0)
+        self.assertEqual(second, 80.0)
+        self.assertEqual(third, 81.0)
+        self.assertEqual(fetch.call_count, 2)
+        instrument_policy.clear_usd_inr_rate_cache()
 
 
 if __name__ == "__main__":
