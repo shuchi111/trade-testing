@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import math
 import os
-from functools import lru_cache
+import time
 
 FRACTIONAL_TICKERS = frozenset({"BTC-USD", "ETH-USD"})
 CRYPTO_QUANTITY_DECIMALS = 6
 DEFAULT_MIN_CRYPTO_BUY_NOTIONAL_INR = 500.0
 DEFAULT_USD_INR_RATE = 85.0
+DEFAULT_USD_INR_CACHE_TTL_SEC = 3600.0
+
+_usd_inr_cache: tuple[float, float] | None = None
 
 
 def is_fractional_ticker(ticker: str) -> bool:
@@ -34,9 +37,22 @@ def usd_inr_fallback_rate() -> float:
         return DEFAULT_USD_INR_RATE
 
 
-@lru_cache(maxsize=1)
-def usd_inr_rate() -> float:
-    """Live USD/INR from yfinance with env fallback."""
+def usd_inr_cache_ttl_sec() -> float:
+    raw = os.getenv("USD_INR_CACHE_TTL_SEC", str(DEFAULT_USD_INR_CACHE_TTL_SEC)).strip()
+    try:
+        ttl = float(raw)
+        return ttl if ttl > 0 else DEFAULT_USD_INR_CACHE_TTL_SEC
+    except ValueError:
+        return DEFAULT_USD_INR_CACHE_TTL_SEC
+
+
+def clear_usd_inr_rate_cache() -> None:
+    """Clear cached FX rate (for tests or forced refresh)."""
+    global _usd_inr_cache
+    _usd_inr_cache = None
+
+
+def _fetch_usd_inr_rate() -> float:
     try:
         import yfinance as yf  # type: ignore[reportMissingImports]
 
@@ -58,6 +74,20 @@ def usd_inr_rate() -> float:
     return usd_inr_fallback_rate()
 
 
+def usd_inr_rate() -> float:
+    """Live USD/INR from yfinance with env fallback; cached with TTL."""
+    global _usd_inr_cache
+    now = time.monotonic()
+    if _usd_inr_cache is not None:
+        cached_rate, fetched_at = _usd_inr_cache
+        if now - fetched_at < usd_inr_cache_ttl_sec():
+            return cached_rate
+
+    rate = _fetch_usd_inr_rate()
+    _usd_inr_cache = (rate, now)
+    return rate
+
+
 def quote_to_inr(ticker: str, quote_price: float, currency: str | None = None) -> float:
     """Convert a market quote into INR for wallet math."""
     if not quote_price or quote_price <= 0:
@@ -74,7 +104,7 @@ def size_buy_quantity(*, buy_value_inr: float, price_inr: float, fractional: boo
     raw = buy_value_inr / price_inr
     if fractional:
         scale = 10**CRYPTO_QUANTITY_DECIMALS
-        return math.floor(raw * scale) / scale
+        return round(raw * scale) / scale
     return float(int(buy_value_inr // price_inr))
 
 
