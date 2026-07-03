@@ -10,6 +10,7 @@ AGENT_DIR = Path(__file__).resolve().parents[1] / "agent"
 if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
 
+from tradingagents.dataflows import symbol_utils
 from tradingagents.dataflows.symbol_utils import normalize_symbol, resolve_instrument_identity
 
 
@@ -19,7 +20,8 @@ def _install_yfinance_stub(info: dict):
             self.symbol = symbol
             self.info = info
 
-    return patch.dict(sys.modules, {"yfinance": types.SimpleNamespace(Ticker=FakeTicker)})
+    fake_yf = types.SimpleNamespace(Ticker=FakeTicker)
+    return patch.object(symbol_utils, "yf", fake_yf)
 
 
 class SymbolUtilsTests(unittest.TestCase):
@@ -56,7 +58,7 @@ class SymbolUtilsTests(unittest.TestCase):
             def info(self):
                 raise RuntimeError("vendor down")
 
-        with patch.dict(sys.modules, {"yfinance": types.SimpleNamespace(Ticker=lambda symbol: FailingTicker())}):
+        with patch.object(symbol_utils, "yf", types.SimpleNamespace(Ticker=lambda symbol: FailingTicker())):
             self.assertEqual(resolve_instrument_identity("TCS.NS"), {})
 
 

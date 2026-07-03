@@ -17,11 +17,17 @@ import execute_ai_trades
 
 
 class DecideAndExecuteTests(unittest.TestCase):
-    def _patch_common_dependencies(self, *, reference_price: float | None, cash: float):
+    def _patch_common_dependencies(
+        self,
+        *,
+        reference_price: float | None,
+        cash: float,
+        snapshot_close: float = 3500.0,
+    ):
         logged: list[dict] = []
 
         patches = [
-            patch.object(execute_ai_trades, "already_executed", return_value=False),
+            patch.object(execute_ai_trades, "load_prior_execution", return_value=None),
             patch.object(
                 execute_ai_trades,
                 "latest_recommendation",
@@ -31,6 +37,14 @@ class DecideAndExecuteTests(unittest.TestCase):
                     "final_trade_decision": "",
                     "reference_price": reference_price,
                 },
+            ),
+            patch.object(
+                execute_ai_trades,
+                "require_fresh_market_snapshot",
+                return_value=types.SimpleNamespace(
+                    latest_close=snapshot_close,
+                    currency="INR",
+                ),
             ),
             patch.object(execute_ai_trades, "resolve_canonical_decision", return_value="BUY"),
             patch.object(execute_ai_trades, "recommendation_bucket", return_value="buy"),
@@ -47,7 +61,9 @@ class DecideAndExecuteTests(unittest.TestCase):
         return patches, logged
 
     def test_missing_reference_price_skips_without_unverified_fallback(self):
-        patches, logged = self._patch_common_dependencies(reference_price=None, cash=100000.0)
+        patches, logged = self._patch_common_dependencies(
+            reference_price=None, cash=100000.0, snapshot_close=0.0
+        )
         for dep_patch in patches:
             self.enterContext(dep_patch)
 
@@ -81,6 +97,44 @@ class DecideAndExecuteTests(unittest.TestCase):
         self.assertEqual(result["skip_reason"], "insufficient_cash_for_whole_share")
         self.assertEqual(logged[-1]["skip_reason"], "insufficient_cash_for_whole_share")
         execute_ai_trades.execute_trade.assert_not_called()
+
+
+class ShouldSkipIdempotentTests(unittest.TestCase):
+    def test_same_recommendation_skips(self):
+        prior = {
+            "recommendation_id": "reco-1",
+            "action_taken": "SKIP",
+            "decision": "BUY",
+        }
+        self.assertTrue(
+            execute_ai_trades.should_skip_idempotent(
+                prior, current_reco_id="reco-1", current_decision="SELL"
+            )
+        )
+
+    def test_decision_change_allows_rerun(self):
+        prior = {
+            "recommendation_id": "reco-1",
+            "action_taken": "SKIP",
+            "decision": "BUY",
+        }
+        self.assertFalse(
+            execute_ai_trades.should_skip_idempotent(
+                prior, current_reco_id="reco-2", current_decision="SELL"
+            )
+        )
+
+    def test_same_trade_decision_skips(self):
+        prior = {
+            "recommendation_id": "reco-1",
+            "action_taken": "BUY",
+            "decision": "BUY",
+        }
+        self.assertTrue(
+            execute_ai_trades.should_skip_idempotent(
+                prior, current_reco_id="reco-2", current_decision="BUY"
+            )
+        )
 
 
 class TradeBlockSkipReasonTests(unittest.TestCase):
