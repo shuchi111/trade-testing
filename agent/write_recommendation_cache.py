@@ -48,6 +48,10 @@ from portfolio_db import build_analysis_context, load_holding
 from recommendation_bucket import recommendation_bucket
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.dataflows.market_data_validator import require_fresh_market_snapshot
+from tradingagents.graph.confidence_extraction import (
+    build_quick_llm_from_config,
+    extract_confidence_pct,
+)
 from tradingagents.graph.report_builder import build_complete_report
 from tradingagents.graph.signal_processing import is_transient_propagate_error
 from tradingagents.graph.trading_graph import TradingAgentsGraph
@@ -250,8 +254,10 @@ def _extract_signal_metrics(
     decision: str,
     final_trade_decision: str,
     reference_price: float | None,
+    full_report: str = "",
+    ai_confidence_pct: float | None = None,
 ) -> dict[str, float | str | None]:
-    text = f"{decision or ''}\n{final_trade_decision or ''}"
+    text = f"{decision or ''}\n{final_trade_decision or ''}\n{full_report or ''}"
     action = recommendation_bucket(decision).upper()
     entry = reference_price if reference_price and reference_price > 0 else None
     # Positive-only: a parsed 0/negative is treated as "not found" so the
@@ -264,13 +270,15 @@ def _extract_signal_metrics(
         text,
         [r"\b(?:stop\s*loss|stoploss|stop|sl)\s*(?:price)?\s*[:=@-]?\s*(?:₹|rs\.?|inr)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)"],
     ))
-    confidence = _first_number_match(
-        text,
-        [
-            r"\b(?:confidence|probability|conviction)\s*[:=@-]?\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*%",
-            r"\b([0-9]{1,3}(?:\.[0-9]+)?)\s*%\s*(?:confidence|probability|conviction)\b",
-        ],
-    )
+    confidence = ai_confidence_pct
+    if confidence is None:
+        confidence = _first_number_match(
+            text,
+            [
+                r"\b(?:ai\s+)?(?:confidence|probability|conviction)\s*[:=@-]?\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*%",
+                r"\b([0-9]{1,3}(?:\.[0-9]+)?)\s*%\s*(?:ai\s+)?(?:confidence|probability|conviction)\b",
+            ],
+        )
 
     if entry is not None and stop is None:
         stop = entry * (1 - DEFAULT_TRAILING_STOP_PCT / 100.0)
@@ -293,6 +301,30 @@ def _extract_signal_metrics(
     }
 
 
+def build_signal_metrics(
+    decision: str,
+    final_trade_decision: str,
+    reference_price: float | None,
+    full_report: str = "",
+    *,
+    llm=None,
+) -> dict[str, float | str | None]:
+    """Parse trade levels and derive confidence from the full analysis report."""
+    confidence = extract_confidence_pct(
+        full_report,
+        decision=decision,
+        final_trade_decision=final_trade_decision,
+        llm=llm,
+    )
+    return _extract_signal_metrics(
+        decision,
+        final_trade_decision,
+        reference_price,
+        full_report=full_report,
+        ai_confidence_pct=confidence,
+    )
+
+
 def upsert_cache_row(
     conn,
     *,
@@ -306,6 +338,7 @@ def upsert_cache_row(
     source: str,
     full_report: str = "",
     portfolio_context_snapshot: str = "",
+    signal_metrics: dict[str, float | str | None] | None = None,
 ) -> None:
     """Append a recommendation row into ``ai_recommendation_cache``.
 
@@ -333,7 +366,12 @@ def upsert_cache_row(
     source : str
         Provenance tag (e.g. ``"github_action"``).
     """
-    metrics = _extract_signal_metrics(decision, final_trade_decision, reference_price)
+    metrics = signal_metrics or _extract_signal_metrics(
+        decision,
+        final_trade_decision,
+        reference_price,
+        full_report=full_report,
+    )
     sql = """
     INSERT INTO ai_recommendation_cache (
       ticker, trade_date, decision, final_trade_decision, reference_price,
@@ -566,6 +604,14 @@ def run_single_recommendation(
             portfolio_context=portfolio_context,
             canonical_decision=decision,
         )
+        confidence_llm = build_quick_llm_from_config(cfg)
+        signal_metrics = build_signal_metrics(
+            str(decision or ""),
+            str(final_trade_decision),
+            reference_price,
+            full_report,
+            llm=confidence_llm,
+        )
         upsert_cache_row(
             conn,
             ticker=ticker,
@@ -578,6 +624,7 @@ def run_single_recommendation(
             source=source,
             full_report=full_report,
             portfolio_context_snapshot=portfolio_context,
+            signal_metrics=signal_metrics,
         )
         if owns_conn and not source.startswith("circleci"):
             try:
