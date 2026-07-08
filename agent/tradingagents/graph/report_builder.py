@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from tradingagents.graph.signal_processing import coerce_decision_token
+
 
 def _section(title: str, body: str) -> str:
     text = (body or "").strip()
@@ -24,15 +26,19 @@ def build_complete_report(
     final_state: Mapping[str, Any],
     *,
     portfolio_context: str = "",
+    canonical_decision: str = "",
 ) -> str:
     """Render the same multi-section report shape as the TradingAgents CLI."""
     ticker = final_state.get("company_of_interest") or "UNKNOWN"
     trade_date = final_state.get("trade_date") or ""
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    final_pm = str(final_state.get("final_trade_decision") or "")
+    decision = (canonical_decision or "").strip() or coerce_decision_token("", final_pm)
 
     parts = [
         f"# Trading Analysis Report: {ticker}",
         "",
+        f"**Decision:** {decision}",
         f"Generated: {generated} UTC",
         f"Trade date: {trade_date}",
         "",
@@ -74,6 +80,6 @@ def build_complete_report(
         _section("Neutral Analyst", _debate_field(final_state, "risk_debate_state", "neutral_history")),
         "## V. Portfolio Manager Decision",
         "",
-        _section("Portfolio Manager", str(final_state.get("final_trade_decision") or "")),
+        _section("Portfolio Manager", final_pm),
     ])
     return "\n".join(parts).strip() + "\n"

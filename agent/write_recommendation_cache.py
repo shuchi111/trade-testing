@@ -564,6 +564,7 @@ def run_single_recommendation(
         full_report = build_complete_report(
             final_state,
             portfolio_context=portfolio_context,
+            canonical_decision=decision,
         )
         upsert_cache_row(
             conn,
