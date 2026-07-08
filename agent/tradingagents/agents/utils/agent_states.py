@@ -45,3 +45,6 @@ class AgentState(MessagesState):
     portfolio_context: Annotated[str, "Current paper wallet holding for this ticker (quantity and avg entry price)"]
     instrument_context: Annotated[str, "Resolved ticker/company identity context"]
     market_snapshot: Annotated[str, "Verified market snapshot context"]
+    # Additive (upstream parity): asset class flag for prompt branching. Defaults to
+    # "equity"; callers may pass "crypto" for BTC-USD/ETH-USD style tickers.
+    asset_type: Annotated[str, "Asset class of company_of_interest (equity/crypto)"]
