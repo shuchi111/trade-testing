@@ -19,6 +19,7 @@ class Propagator:
         portfolio_context: str = "",
         instrument_context: str = "",
         market_snapshot: str = "",
+        asset_type: str = "equity",
     ) -> Dict[str, Any]:
         return {
             "messages": [("human", company_name)],
@@ -27,6 +28,9 @@ class Propagator:
             "portfolio_context": portfolio_context,
             "instrument_context": instrument_context,
             "market_snapshot": market_snapshot,
+            # Additive (upstream parity): asset class flag for prompt branching.
+            # Default "equity" preserves today's behaviour; callers may pass "crypto".
+            "asset_type": asset_type,
             "investment_debate_state": InvestDebateState(
                 {
                     "bull_history": "",

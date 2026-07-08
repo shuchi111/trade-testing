@@ -1,14 +1,88 @@
+"""Symbol normalization and identity resolution for vendor calls."""
+
 from __future__ import annotations
 
+import logging
+import re
 from functools import lru_cache
 from typing import Any
 
 import yfinance as yf  # type: ignore[reportMissingImports]
 
+from .errors import NoMarketDataError as NoMarketDataError
 
-def normalize_symbol(symbol: str) -> str:
-    """Normalize whitespace/case while preserving exchange suffixes like .NS."""
-    return (symbol or "").strip().upper()
+logger = logging.getLogger(__name__)
+
+_FOREX_CURRENCIES = frozenset(
+    {
+        "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD",
+        "CNY", "CNH", "HKD", "SGD", "SEK", "NOK", "DKK", "PLN",
+        "MXN", "ZAR", "TRY", "INR", "KRW", "BRL", "RUB", "THB",
+    }
+)
+
+_CRYPTO_BASES = frozenset(
+    {"BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "BCH", "DOT", "AVAX", "LINK"}
+)
+
+_ALIASES = {
+    "XAUUSD": "GC=F", "XAU": "GC=F", "GOLD": "GC=F",
+    "XAGUSD": "SI=F", "XAG": "SI=F", "SILVER": "SI=F",
+    "XPTUSD": "PL=F", "XPDUSD": "PA=F",
+    "WTICOUSD": "CL=F", "USOIL": "CL=F", "WTI": "CL=F",
+    "BCOUSD": "BZ=F", "UKOIL": "BZ=F", "BRENT": "BZ=F",
+    "NATGAS": "NG=F", "XNGUSD": "NG=F",
+    "COPPER": "HG=F", "XCUUSD": "HG=F",
+    "SPX500": "^GSPC", "US500": "^GSPC", "SPX": "^GSPC",
+    "NAS100": "^NDX", "US100": "^NDX", "USTEC": "^NDX",
+    "US30": "^DJI", "DJI30": "^DJI", "WS30": "^DJI",
+    "GER40": "^GDAXI", "GER30": "^GDAXI", "DE40": "^GDAXI",
+    "UK100": "^FTSE", "JP225": "^N225", "JPN225": "^N225",
+    "FRA40": "^FCHI", "EU50": "^STOXX50E", "HK50": "^HSI",
+}
+
+_YAHOO_SAFE = re.compile(r"^[A-Za-z0-9._\-\^=]+$")
+_CRYPTO_QUOTES = ("USDT", "USDC", "USD")
+
+
+def crypto_base(raw: str) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    compact = raw.strip().upper().rstrip("+").replace("-", "")
+    for quote in _CRYPTO_QUOTES:
+        if compact.endswith(quote):
+            base = compact[: -len(quote)]
+            return base if base in _CRYPTO_BASES else None
+    return None
+
+
+def _normalize_crypto(s: str) -> str | None:
+    base = crypto_base(s)
+    return f"{base}-USD" if base else None
+
+
+def normalize_symbol(raw: str) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        return raw
+
+    s = raw.strip().upper().rstrip("+")
+    crypto = _normalize_crypto(s)
+    if s in _ALIASES:
+        canonical = _ALIASES[s]
+    elif crypto is not None:
+        canonical = crypto
+    elif len(s) == 6 and s[:3] in _FOREX_CURRENCIES and s[3:] in _FOREX_CURRENCIES:
+        canonical = f"{s}=X"
+    else:
+        canonical = s
+
+    if canonical != raw.strip().upper():
+        logger.info("Resolved symbol %r to Yahoo symbol %r", raw, canonical)
+    return canonical
+
+
+def is_yahoo_safe(symbol: str) -> bool:
+    return bool(symbol) and _YAHOO_SAFE.fullmatch(symbol) is not None
 
 
 def _clean_identity_value(value: Any) -> str | None:
@@ -22,30 +96,6 @@ def _clean_identity_value(value: Any) -> str | None:
 
 @lru_cache(maxsize=256)
 def resolve_instrument_identity(ticker: str) -> dict[str, str]:
-    """Best-effort real identity lookup for a ticker.
-
-    Parameters
-    ----------
-    ticker
-        Exchange-qualified instrument symbol to resolve.
-
-    Returns
-    -------
-    dict[str, str]
-        Identity fields such as ``company_name``, ``sector``, ``industry``,
-        ``exchange``, ``currency``, and ``quote_type`` when yfinance provides
-        usable values. Returns an empty dictionary when lookup fails or the
-        symbol is empty.
-
-    Raises
-    ------
-    No exceptions are raised. Lookup errors are intentionally fail-open.
-
-    Notes
-    -----
-    Identity is fail-open: recommendations should not hallucinate a company,
-    but yfinance identity outages should not stop a run before data validation.
-    """
     symbol = normalize_symbol(ticker)
     if not symbol:
         return {}
