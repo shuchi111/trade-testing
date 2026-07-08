@@ -10,6 +10,8 @@ from tradingagents.agents.utils.fundamental_data_tools import (
     get_cashflow,
     get_income_statement,
 )
+from tradingagents.agents.utils.macro_data_tools import get_macro_indicators
+from tradingagents.agents.utils.prediction_markets_tools import get_prediction_markets
 from tradingagents.agents.utils.news_data_tools import (
     get_news,
     get_insider_transactions,
@@ -17,9 +19,29 @@ from tradingagents.agents.utils.news_data_tools import (
 )
 from tradingagents.dataflows.symbol_utils import resolve_instrument_identity
 
+__all__ = [
+    "get_stock_data",
+    "get_indicators",
+    "get_verified_market_snapshot",
+    "get_fundamentals",
+    "get_balance_sheet",
+    "get_cashflow",
+    "get_income_statement",
+    "get_news",
+    "get_global_news",
+    "get_insider_transactions",
+    "get_macro_indicators",
+    "get_prediction_markets",
+    "langchain_tools",
+    "tool_names",
+    "get_language_instruction",
+    "build_instrument_context",
+    "get_instrument_context_from_state",
+    "create_msg_delete",
+]
+
 
 def langchain_tools(tools: list) -> list[BaseTool]:
-    """Normalize mixed tool definitions before binding them to LLMs or ToolNode."""
     return [
         candidate if isinstance(candidate, BaseTool) else create_tool(candidate)
         for candidate in tools
@@ -27,35 +49,26 @@ def langchain_tools(tools: list) -> list[BaseTool]:
 
 
 def tool_names(tools: list) -> str:
-    """Return display names for LangChain tools and plain Python functions."""
     return ", ".join(
         getattr(tool, "name", None) or getattr(tool, "__name__", str(tool))
         for tool in tools
     )
 
 
+def get_language_instruction() -> str:
+    from tradingagents.dataflows.config import get_config
+
+    lang = get_config().get("output_language", "English")
+    if lang.strip().lower() == "english":
+        return ""
+    return f" Write your entire response in {lang}."
+
+
 def build_instrument_context(ticker: str, identity: dict | None = None) -> str:
-    """Describe the exact instrument for downstream agents.
-
-    Parameters
-    ----------
-    ticker
-        Exchange-qualified instrument symbol to preserve in tool calls,
-        reports, and recommendations.
-    identity
-        Optional pre-resolved identity metadata. When omitted, identity is
-        looked up best-effort from the ticker.
-
-    Returns
-    -------
-    str
-        Instructional context reminding agents to use ``ticker`` exactly and,
-        when available, preserve the resolved company identity.
-    """
     context = (
         f"The instrument to analyze is `{ticker}`. "
         "Use this exact ticker in every tool call, report, and recommendation, "
-        "preserving any exchange suffix (e.g. `.TO`, `.L`, `.HK`, `.T`)."
+        "preserving any exchange suffix (e.g. `.TO`, `.L`, `.HK`, `.T`, `.NS`, `-USD`)."
     )
     identity = identity if identity is not None else resolve_instrument_identity(ticker)
     details = []
@@ -81,19 +94,6 @@ def build_instrument_context(ticker: str, identity: dict | None = None) -> str:
 
 
 def get_instrument_context_from_state(state: dict) -> str:
-    """Build exact-instrument context from an agent state mapping.
-
-    Parameters
-    ----------
-    state
-        Agent state containing ``company_of_interest`` or ``ticker``.
-
-    Returns
-    -------
-    str
-        Instrument-preservation instructions from state, reusing an existing
-        ``instrument_context`` when present.
-    """
     context = state.get("instrument_context")
     if isinstance(context, str) and context.strip():
         return context
@@ -102,7 +102,6 @@ def get_instrument_context_from_state(state: dict) -> str:
 
 def create_msg_delete():
     def delete_messages(state):
-        """Clear messages and add an anchored placeholder for provider compatibility."""
         messages = state["messages"]
         removal_operations = [RemoveMessage(id=m.id) for m in messages]
         instrument_context = get_instrument_context_from_state(state)

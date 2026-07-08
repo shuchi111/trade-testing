@@ -48,6 +48,7 @@ from portfolio_db import build_analysis_context, load_holding
 from recommendation_bucket import recommendation_bucket
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.dataflows.market_data_validator import require_fresh_market_snapshot
+from tradingagents.graph.report_builder import build_complete_report
 from tradingagents.graph.signal_processing import is_transient_propagate_error
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
@@ -87,12 +88,12 @@ def _build_config() -> dict:
         or ""
     )
     config["api_key"] = api_key
-    config["data_vendors"] = {
+    config["data_vendors"].update({
         "core_stock_apis": os.getenv("DATA_VENDOR_STOCKS", "yfinance"),
         "technical_indicators": os.getenv("DATA_VENDOR_INDICATORS", "yfinance"),
         "fundamental_data": os.getenv("DATA_VENDOR_FUNDAMENTALS", "yfinance"),
         "news_data": os.getenv("DATA_VENDOR_NEWS", "yfinance"),
-    }
+    })
     return config
 
 
@@ -165,6 +166,14 @@ def fetch_last_close(symbol: str, period: str | None = None) -> float | None:
         return None
 
 
+_PORTFOLIO_REPORT_SUFFIX = (
+    "\n\n=== LIVE REPORT REQUIREMENT ===\n"
+    "In the final full report, include concrete portfolio and wallet observations: "
+    "current position status, cash/reserve, position cap room, active trailing stop, "
+    "recent live trades, backtest evidence, and whether the decision adds risk or reduces risk."
+)
+
+
 def _portfolio_context(
     conn,
     ticker: str,
@@ -175,12 +184,13 @@ def _portfolio_context(
 ) -> str:
     """Build rich portfolio + backtest + trade history context for LLM agents."""
     try:
-        return build_analysis_context(
+        context = build_analysis_context(
             conn,
             ticker,
             trade_date=trade_date,
             reference_price=reference_price,
         )
+        return f"{context}{_PORTFOLIO_REPORT_SUFFIX}"
     except Exception as exc:
         try:
             conn.rollback()
@@ -294,6 +304,8 @@ def upsert_cache_row(
     holding_quantity: float,
     holding_avg_entry: float,
     source: str,
+    full_report: str = "",
+    portfolio_context_snapshot: str = "",
 ) -> None:
     """Append a recommendation row into ``ai_recommendation_cache``.
 
@@ -327,9 +339,11 @@ def upsert_cache_row(
       ticker, trade_date, decision, final_trade_decision, reference_price,
       signal_action, target_price, stop_loss_price, risk_amount, reward_amount,
       risk_reward_ratio, ai_confidence_pct,
-      holding_quantity, holding_avg_entry, source, computed_at
+      holding_quantity, holding_avg_entry, source,
+      full_report, portfolio_context_snapshot,
+      computed_at
     )
-    VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now());
+    VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now());
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -350,6 +364,8 @@ def upsert_cache_row(
                 holding_quantity,
                 holding_avg_entry,
                 source,
+                full_report or "",
+                portfolio_context_snapshot or "",
             ),
         )
     if recommendation_bucket(decision) == "buy":
@@ -371,6 +387,8 @@ def upsert_cache_row(
         holding_quantity=holding_quantity,
         holding_avg_entry=holding_avg_entry,
         source=source,
+        full_report=full_report,
+        portfolio_context_snapshot=portfolio_context_snapshot,
     )
     conn.commit()
 
@@ -386,6 +404,8 @@ def _insert_history(
     holding_quantity: float,
     holding_avg_entry: float,
     source: str,
+    full_report: str = "",
+    portfolio_context_snapshot: str = "",
 ) -> None:
     bucket = recommendation_bucket(decision)
     metrics = _extract_signal_metrics(decision, final_trade_decision, reference_price)
@@ -394,9 +414,11 @@ def _insert_history(
       ticker, trade_date, decision, final_trade_decision, bucket,
       reference_price, signal_action, target_price, stop_loss_price, risk_amount,
       reward_amount, risk_reward_ratio, ai_confidence_pct,
-      holding_quantity, holding_avg_entry, source, computed_at
+      holding_quantity, holding_avg_entry, source,
+      full_report, portfolio_context_snapshot,
+      computed_at
     )
-    VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+    VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
     ON CONFLICT (ticker, trade_date, decision) DO NOTHING;
     """
     with conn.cursor() as cur:
@@ -419,6 +441,8 @@ def _insert_history(
                 holding_quantity,
                 holding_avg_entry,
                 source,
+                full_report or "",
+                portfolio_context_snapshot or "",
             ),
         )
 
@@ -537,6 +561,11 @@ def run_single_recommendation(
             str(decision or ""),
             str(final_trade_decision),
         )
+        full_report = build_complete_report(
+            final_state,
+            portfolio_context=portfolio_context,
+            canonical_decision=decision,
+        )
         upsert_cache_row(
             conn,
             ticker=ticker,
@@ -547,6 +576,8 @@ def run_single_recommendation(
             holding_quantity=float(holding_quantity),
             holding_avg_entry=float(holding_avg_entry),
             source=source,
+            full_report=full_report,
+            portfolio_context_snapshot=portfolio_context,
         )
         if owns_conn and not source.startswith("circleci"):
             try:
@@ -582,6 +613,7 @@ def run_single_recommendation(
         "trade_date": trade_date,
         "decision": decision,
         "reference_price": reference_price,
+        "has_full_report": bool(full_report),
     }
 
 

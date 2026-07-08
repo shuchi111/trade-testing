@@ -30,6 +30,8 @@ from tradingagents.agents.utils.agent_utils import (
     get_news,
     get_insider_transactions,
     get_global_news,
+    get_macro_indicators,
+    get_prediction_markets,
     langchain_tools,
 )
 from tradingagents.dataflows.market_data_validator import format_market_snapshot, verified_market_snapshot
@@ -40,6 +42,7 @@ from .setup import GraphSetup
 from .propagation import Propagator
 from .reflection import Reflector
 from .signal_processing import SignalProcessor
+from .decision_log import TradingMemoryLog
 
 
 def _eval_results_dir() -> Path:
@@ -57,6 +60,7 @@ class TradingAgentsGraph:
         debug=False,
         config: Dict[str, Any] = None,
         callbacks: Optional[List] = None,
+        checkpointer: Any = None,
     ):
         self.debug = debug
         self.config = config or DEFAULT_CONFIG
@@ -68,6 +72,11 @@ class TradingAgentsGraph:
             os.path.join(self.config["project_dir"], "dataflows/data_cache"),
             exist_ok=True,
         )
+
+        # Additive (upstream parity): persistent markdown decision log. No-op unless
+        # config["decision_log_dir"] (env TRADINGAGENTS_DECISION_LOG_DIR) is set.
+        log_dir = self.config.get("decision_log_dir")
+        self.memory_log = TradingMemoryLog(log_dir) if log_dir else None
 
         llm_kwargs = self._get_provider_kwargs()
 
@@ -112,6 +121,7 @@ class TradingAgentsGraph:
             self.invest_judge_memory,
             self.portfolio_manager_memory,
             self.conditional_logic,
+            checkpointer=checkpointer,
         )
 
         self.propagator = Propagator(
@@ -164,7 +174,8 @@ class TradingAgentsGraph:
                 kwargs["api_key"] = api_key
 
         # Single place for HTTP resilience (``google`` uses the same kwargs keys in ``GoogleClient``).
-        if provider in ("anthropic", "glm", "openai", "google", "xai", "openrouter"):
+        if provider in ("anthropic", "glm", "openai", "google", "xai", "openrouter",
+                        "nvidia", "kimi", "groq", "mistral"):
             kwargs["timeout"] = float(os.getenv("LLM_HTTP_TIMEOUT", "300"))
             backend = str(self.config.get("backend_url", ""))
             if provider == "anthropic" and "api.z.ai" in backend:
@@ -179,11 +190,17 @@ class TradingAgentsGraph:
         return {
             "market": ToolNode(langchain_tools([get_stock_data, get_indicators, get_verified_market_snapshot])),
             "social": ToolNode(langchain_tools([get_news])),
-            "news": ToolNode(langchain_tools([get_news, get_global_news, get_insider_transactions])),
+            "news": ToolNode(langchain_tools([
+                get_news,
+                get_global_news,
+                get_insider_transactions,
+                get_macro_indicators,
+                get_prediction_markets,
+            ])),
             "fundamentals": ToolNode(langchain_tools([get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement])),
         }
 
-    def propagate(self, company_name, trade_date, portfolio_context: str = ""):
+    def propagate(self, company_name, trade_date, portfolio_context: str = "", asset_type: str = "equity"):
         self.ticker = company_name
         identity = resolve_instrument_identity(company_name)
         instrument_context = build_instrument_context(company_name, identity=identity)
@@ -200,6 +217,7 @@ class TradingAgentsGraph:
             portfolio_context=portfolio_context,
             instrument_context=instrument_context,
             market_snapshot=market_snapshot,
+            asset_type=asset_type,
         )
         args = self.propagator.get_graph_args()
 
@@ -217,8 +235,28 @@ class TradingAgentsGraph:
 
         self.curr_state = final_state
         self._log_state(trade_date, final_state)
+        self._log_decision(trade_date, final_state, asset_type=asset_type)
 
         return final_state, self.process_signal(final_state["final_trade_decision"])
+
+    def _log_decision(self, trade_date, final_state, asset_type: str = "equity", reflection: str = None):
+        """Append to the optional markdown TradingMemoryLog (no-op if disabled)."""
+        if self.memory_log is None:
+            return
+        self.memory_log.log_decision(
+            ticker=self.ticker,
+            trade_date=str(trade_date),
+            decision=final_state.get("final_trade_decision", ""),
+            rating=None,
+            market_report=final_state.get("market_report", ""),
+            sentiment_report=final_state.get("sentiment_report", ""),
+            news_report=final_state.get("news_report", ""),
+            fundamentals_report=final_state.get("fundamentals_report", ""),
+            investment_plan=final_state.get("investment_plan", ""),
+            final_trade_decision=final_state.get("final_trade_decision", ""),
+            reflection=reflection,
+            asset_type=asset_type,
+        )
 
     def _log_state(self, trade_date, final_state):
         self.log_states_dict[str(trade_date)] = {
@@ -260,6 +298,15 @@ class TradingAgentsGraph:
         self.reflector.reflect_trader(self.curr_state, returns_losses, self.trader_memory)
         self.reflector.reflect_invest_judge(self.curr_state, returns_losses, self.invest_judge_memory)
         self.reflector.reflect_portfolio_manager(self.curr_state, returns_losses, self.portfolio_manager_memory)
+        # Append the feedback to the optional persistent log (no-op if disabled).
+        if self.memory_log is not None and self.curr_state is not None:
+            self.memory_log.log_decision(
+                ticker=self.ticker,
+                trade_date=str(self.curr_state.get("trade_date", "")),
+                decision="",
+                reflection=f"Returns/losses feedback: {returns_losses}",
+                final_trade_decision=self.curr_state.get("final_trade_decision", ""),
+            )
 
     def process_signal(self, full_signal):
         return self.signal_processor.process_signal(full_signal)
