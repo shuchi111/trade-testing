@@ -21,6 +21,7 @@ import html
 import http.client
 import json
 import logging
+import os
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -30,7 +31,8 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from .symbol_utils import crypto_base
+from .fetch_cache import cached_fetch
+from .symbol_utils import indian_equity_base, reddit_search_term
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +48,14 @@ _ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 # Default subreddits ordered roughly by signal density for ticker-specific
 # discussion. wallstreetbets has the most volume but most noise; stocks /
 # investing trend more measured. Caller can override.
-DEFAULT_SUBREDDITS = ("wallstreetbets", "stocks", "investing")
+DEFAULT_SUBREDDITS_US = ("wallstreetbets", "stocks", "investing")
+DEFAULT_SUBREDDITS_IN = ("IndiaInvestments", "IndianStreetBets", "dalalstreet")
+DEFAULT_SUBREDDITS = DEFAULT_SUBREDDITS_US
+
+
+def subreddits_for_ticker(ticker: str) -> tuple[str, ...]:
+    """Pick finance subreddits that match the instrument's primary market."""
+    return DEFAULT_SUBREDDITS_IN if indian_equity_base(ticker) else DEFAULT_SUBREDDITS_US
 
 
 def _search_qs(ticker: str, limit: int) -> str:
@@ -188,36 +197,31 @@ def _fetch_subreddit(
     return _fetch_subreddit_rss(ticker, sub, limit, timeout)
 
 
-def fetch_reddit_posts(
+def _fetch_reddit_posts_uncached(
     ticker: str,
-    subreddits: Iterable[str] = DEFAULT_SUBREDDITS,
+    subreddits: Iterable[str],
     limit_per_sub: int = 5,
     timeout: float = 10.0,
-    inter_request_delay: float = 1.0,
+    inter_request_delay: float = 2.5,
 ) -> str:
-    """Fetch recent Reddit posts mentioning ``ticker`` across finance
-    subreddits and return them as a formatted plaintext block.
-
-    ``inter_request_delay`` paces the (now RSS-only) per-subreddit requests to
-    stay under Reddit's public per-IP rate limit; combined with the RSS-first
-    path it makes 429s rare even when several analyses run back-to-back.
-    """
-    # Crypto reaches us as a Yahoo pair (BTC-USD); search Reddit for the base
-    # ("BTC") so the query actually matches discussion instead of near-nothing.
-    ticker = crypto_base(ticker) or ticker
+    """Fetch recent Reddit posts mentioning ``search_term`` across subreddits."""
+    search_term = reddit_search_term(ticker)
     blocks = []
     total_posts = 0
-    for i, sub in enumerate(subreddits):
+    subs = tuple(subreddits)
+    for i, sub in enumerate(subs):
         if i > 0:
             time.sleep(inter_request_delay)
-        posts = _fetch_subreddit(ticker, sub, limit_per_sub, timeout)
+        posts = _fetch_subreddit(search_term, sub, limit_per_sub, timeout)
         total_posts += len(posts)
         if not posts:
-            blocks.append(f"r/{sub}: <no posts found mentioning {ticker.upper()} in the past 7 days>")
+            blocks.append(
+                f"r/{sub}: <no posts found mentioning {search_term.upper()} in the past 7 days>"
+            )
             continue
 
         via_rss = any(p.get("source") == "rss" for p in posts)
-        header = f"r/{sub} — {len(posts)} recent posts mentioning {ticker.upper()}"
+        header = f"r/{sub} — {len(posts)} recent posts mentioning {search_term.upper()}"
         header += " (via RSS feed; scores/comments unavailable):" if via_rss else ":"
         lines = [header]
         for p in posts:
@@ -228,8 +232,6 @@ def fetch_reddit_posts(
             created_str = (
                 time.strftime("%Y-%m-%d", time.gmtime(created)) if created else "?"
             )
-            # Score / comment counts are absent on the RSS fallback path —
-            # show them only when present rather than printing fake zeros.
             meta = created_str
             if score is not None and comments is not None:
                 meta += f" · {score:>4}↑ · {comments:>3}c"
@@ -244,7 +246,38 @@ def fetch_reddit_posts(
 
     if total_posts == 0:
         return (
-            f"<no Reddit posts found mentioning {ticker.upper()} across "
-            f"{', '.join(f'r/{s}' for s in subreddits)} in the past 7 days>"
+            f"<no Reddit posts found mentioning {search_term.upper()} across "
+            f"{', '.join(f'r/{s}' for s in subs)} in the past 7 days>"
         )
     return "\n\n".join(blocks)
+
+
+def fetch_reddit_posts(
+    ticker: str,
+    subreddits: Iterable[str] | None = None,
+    limit_per_sub: int = 5,
+    timeout: float = 10.0,
+    inter_request_delay: float | None = None,
+) -> str:
+    """Fetch recent Reddit posts mentioning ``ticker`` across finance
+    subreddits and return them as a formatted plaintext block.
+
+    ``inter_request_delay`` paces the (now RSS-only) per-subreddit requests to
+    stay under Reddit's public per-IP rate limit; combined with the RSS-first
+    path it makes 429s rare even when several analyses run back-to-back.
+    """
+    subs = tuple(subreddits) if subreddits is not None else subreddits_for_ticker(ticker)
+    delay = inter_request_delay
+    if delay is None:
+        delay = float(os.getenv("REDDIT_INTER_REQUEST_DELAY_SEC", "2.5"))
+    return cached_fetch(
+        ("reddit", reddit_search_term(ticker).upper(), subs, limit_per_sub),
+        lambda: _fetch_reddit_posts_uncached(
+            ticker,
+            subs,
+            limit_per_sub=limit_per_sub,
+            timeout=timeout,
+            inter_request_delay=delay,
+        ),
+        ttl_sec=float(os.getenv("SOCIAL_FETCH_CACHE_TTL_SEC", "300")),
+    )

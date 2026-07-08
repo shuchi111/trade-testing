@@ -604,6 +604,12 @@ def run_single_recommendation(
             portfolio_context=portfolio_context,
             canonical_decision=decision,
         )
+        if not str(full_report or "").strip():
+            logger.warning(
+                "full_report empty for %s trade_date=%s — UI full report will be unavailable",
+                ticker,
+                trade_date,
+            )
         confidence_llm = build_quick_llm_from_config(cfg)
         signal_metrics = build_signal_metrics(
             str(decision or ""),

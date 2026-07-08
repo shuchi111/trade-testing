@@ -43,6 +43,28 @@ _ALIASES = {
 
 _YAHOO_SAFE = re.compile(r"^[A-Za-z0-9._\-\^=]+$")
 _CRYPTO_QUOTES = ("USDT", "USDC", "USD")
+_INDIAN_EXCHANGE_SUFFIXES = (".NS", ".BO")
+
+
+def indian_equity_base(raw: str) -> str | None:
+    """Return the NSE/BSE base symbol (e.g. ``SUNPHARMA`` from ``SUNPHARMA.NS``)."""
+    if not isinstance(raw, str):
+        return None
+    symbol = raw.strip().upper()
+    for suffix in _INDIAN_EXCHANGE_SUFFIXES:
+        if symbol.endswith(suffix):
+            base = symbol[: -len(suffix)]
+            return base if base else None
+    return None
+
+
+def is_indian_equity(raw: str) -> bool:
+    return indian_equity_base(raw) is not None
+
+
+def reddit_search_term(raw: str) -> str:
+    """Normalize a ticker into a Reddit search query."""
+    return indian_equity_base(raw) or crypto_base(raw) or raw.strip()
 
 
 def crypto_base(raw: str) -> str | None:
