@@ -3,6 +3,8 @@ agent/tradingagents/dataflows/data_cache/*
 !agent/tradingagents/dataflows/data_cache/.gitkeep
 agent/eval_results/
 agent/results/
+agent/tradingagents/reports/
+agent/tradingagents/results/
 
 # Accidental copies from private swing-trader (not used by cron)
 agent/backtest/
