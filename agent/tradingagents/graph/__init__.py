@@ -4,6 +4,7 @@ from .setup import GraphSetup
 from .propagation import Propagator
 from .reflection import Reflector
 from .signal_processing import SignalProcessor
+from .decision_log import TradingMemoryLog
 
 __all__ = [
     "TradingAgentsGraph",
@@ -12,4 +13,5 @@ __all__ = [
     "Propagator",
     "Reflector",
     "SignalProcessor",
+    "TradingMemoryLog",
 ]

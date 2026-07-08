@@ -23,6 +23,7 @@ class GraphSetup:
         invest_judge_memory,
         portfolio_manager_memory,
         conditional_logic: ConditionalLogic,
+        checkpointer: Any = None,
     ):
         self.quick_thinking_llm = quick_thinking_llm
         self.deep_thinking_llm = deep_thinking_llm
@@ -33,6 +34,9 @@ class GraphSetup:
         self.invest_judge_memory = invest_judge_memory
         self.portfolio_manager_memory = portfolio_manager_memory
         self.conditional_logic = conditional_logic
+        # Additive (upstream parity): optional LangGraph checkpointer for resume.
+        # None preserves the original stateless compile() behaviour.
+        self.checkpointer = checkpointer
 
     def setup_graph(self, selected_analysts=["market", "social", "news", "fundamentals"]):
         if len(selected_analysts) == 0:
@@ -48,7 +52,7 @@ class GraphSetup:
             tool_nodes["market"] = self.tool_nodes["market"]
 
         if "social" in selected_analysts:
-            analyst_nodes["social"] = create_social_media_analyst(self.quick_thinking_llm)
+            analyst_nodes["social"] = create_sentiment_analyst(self.quick_thinking_llm)
             delete_nodes["social"] = create_msg_delete()
             tool_nodes["social"] = self.tool_nodes["social"]
 
@@ -138,4 +142,4 @@ class GraphSetup:
         )
         workflow.add_edge("Portfolio Manager", END)
 
-        return workflow.compile()
+        return workflow.compile(checkpointer=self.checkpointer)

@@ -4,13 +4,18 @@ from .base_client import BaseLLMClient
 from .google_client import GoogleClient
 from .openai_client import OpenAIClient
 
-_OPENAI_COMPATIBLE = {"openai", "xai", "openrouter", "ollama", "glm"}
+_OPENAI_COMPATIBLE = {
+    "openai", "xai", "openrouter", "ollama", "glm",
+    # Additive (upstream parity): additional OpenAI-compatible gateways.
+    "nvidia", "kimi", "groq", "mistral",
+}
 
 
 def create_llm_client(provider: str, model: str, base_url: Optional[str] = None, **kwargs) -> BaseLLMClient:
     """Factory function to create the appropriate LLM client.
-    
-    Supported providers: openai, anthropic, google, xai, openrouter, ollama, glm
+
+    Supported providers: openai, anthropic, google, xai, openrouter, ollama, glm,
+    nvidia, kimi (Moonshot), groq, mistral.
     """
     provider_lower = provider.lower()
 
@@ -25,5 +30,6 @@ def create_llm_client(provider: str, model: str, base_url: Optional[str] = None,
 
     raise ValueError(
         f"Unknown provider '{provider}'. "
-        f"Supported providers: anthropic, google, openai, xai, openrouter, ollama, glm"
+        f"Supported providers: anthropic, google, openai, xai, openrouter, ollama, glm, "
+        f"nvidia, kimi, groq, mistral"
     )
