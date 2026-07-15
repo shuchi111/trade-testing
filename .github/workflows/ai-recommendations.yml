@@ -5,8 +5,8 @@ name: AI recommendations (cache)
 
 on:
   schedule:
-    # Weekdays 9:00 AM IST (3:30 AM UTC) — full batch: all tickers.
-    - cron: '30 3 * * 1-5'
+    # Weekdays 5:30 AM IST (12:00 AM UTC) — full batch: all tickers.
+    - cron: '0 0 * * 1-5'
     # Weekdays 3:00 PM IST (9:30 AM UTC) — uncomment to enable second daily run (batch job `if` already matches this cron).
     # - cron: '30 9 * * 1-5'
   repository_dispatch:
