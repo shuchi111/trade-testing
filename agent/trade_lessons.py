@@ -4,6 +4,10 @@ Lessons are stored in Postgres ``ai_trade_lessons`` and injected into:
   - ``build_analysis_context`` (prompt context every run)
   - ``FinancialSituationMemory`` (BM25 past-reflections hooks)
   - ``execute_ai_trades`` BUY gates (hard skip after recent same-ticker losses)
+
+CLI (harvest only)::
+
+  python write_reflection_memory.py --lookback-days 45 --limit 40
 """
 from __future__ import annotations
 
@@ -12,14 +16,45 @@ import re
 from datetime import date, datetime, timedelta
 from typing import Any
 
+from trading_constraints import (
+    lesson_settlement_lag_days,
+    max_position_inr,
+    min_loss_inr_for_cooldown,
+    min_loss_pct_for_cooldown,
+    quality_expectancy_pct_of_cap,
+    quality_min_closed_trades,
+    quality_win_rate_max_pct,
+    recent_loss_cooldown_days,
+)
+
 logger = logging.getLogger(__name__)
 
 ADMIN_WALLET_ID = "00000000-0000-0000-0000-000000000001"
 
-# Cool-off after a realized loss on the same ticker before allowing a new BUY.
+# Back-compat aliases (defaults; runtime values come from trading_constraints env helpers).
 RECENT_LOSS_COOLDOWN_DAYS = 10
-# Minimum absolute INR loss that counts as a "mistake" for cool-off.
 MIN_LOSS_INR_FOR_COOLDOWN = 100.0
+
+_TICKER_RE = re.compile(r"^[A-Z0-9.\-]{1,20}$")
+
+
+def normalize_ticker(ticker: str) -> str:
+    """Uppercase ticker and reject obviously invalid symbols."""
+    normalized = (ticker or "").strip().upper()
+    if not _TICKER_RE.match(normalized):
+        raise ValueError(f"Invalid ticker format: {ticker!r}")
+    return normalized
+
+
+def _is_meaningful_loss(realized_pnl: float, exit_notional: float | None) -> bool:
+    """True when absolute INR floor or % of exit notional threshold is met."""
+    if realized_pnl >= 0:
+        return False
+    if realized_pnl <= -min_loss_inr_for_cooldown():
+        return True
+    if exit_notional and exit_notional > 0:
+        return (realized_pnl / exit_notional) <= -min_loss_pct_for_cooldown()
+    return False
 
 
 def _rollback_after_optional_query_error(conn, label: str, exc: Exception) -> None:
@@ -76,7 +111,12 @@ def _fmt_inr(value: float | None) -> str:
 def load_closed_sells_for_reflection(
     conn, *, lookback_days: int = 45, limit: int = 40
 ) -> list[dict[str, Any]]:
-    """Recent closed SELL rows from the live ledger and AI executions."""
+    """Recent closed SELL rows from the live ledger and AI executions.
+
+    Applies a settlement lag so same-day (or lag-window) closes are not harvested
+    into lessons that could influence the same trading day's decisions.
+    """
+    lag = lesson_settlement_lag_days()
     out: list[dict[str, Any]] = []
     try:
         with conn.cursor() as cur:
@@ -88,10 +128,11 @@ def load_closed_sells_for_reflection(
                   AND action = 'SELL'
                   AND realized_pnl IS NOT NULL
                   AND trade_time >= (CURRENT_DATE - (%s || ' days')::interval)
+                  AND trade_time::date <= (CURRENT_DATE - (%s || ' days')::interval)::date
                 ORDER BY trade_time DESC
                 LIMIT %s
                 """,
-                (ADMIN_WALLET_ID, lookback_days, limit),
+                (ADMIN_WALLET_ID, lookback_days, lag, limit),
             )
             rows = cur.fetchall()
     except Exception as exc:
@@ -126,11 +167,12 @@ def load_closed_sells_for_reflection(
                   AND action_taken = 'SELL'
                   AND dry_run = false
                   AND pnl IS NOT NULL
-                  AND trade_date >= (CURRENT_DATE - (%s || ' days')::interval)
+                  AND trade_date >= (CURRENT_DATE - (%s || ' days')::interval)::date
+                  AND trade_date <= (CURRENT_DATE - (%s || ' days')::interval)::date
                 ORDER BY trade_date DESC, created_at DESC
                 LIMIT %s
                 """,
-                (ADMIN_WALLET_ID, lookback_days, limit),
+                (ADMIN_WALLET_ID, lookback_days, lag, limit),
             )
             exec_rows = cur.fetchall()
     except Exception as exc:
@@ -232,7 +274,7 @@ def build_rule_lesson(trade: dict[str, Any], *, entry_decision: str, report_snip
         lesson = (
             f"MISTAKE LESSON ({ticker}): Realized loss {_fmt_inr(pnl)} on {trade_date}. "
             "Do NOT re-buy this name until weekly structure repairs and risk/reward is clearly "
-            f">= 1.50 after the mandatory 5% trail. Cool-off {RECENT_LOSS_COOLDOWN_DAYS} days. "
+            f">= 1.50 after the mandatory 5% trail. Cool-off {recent_loss_cooldown_days()} days. "
             "Prefer HOLD/UNDERWEIGHT over revenge BUY. Size only inside remaining per-stock cap "
             "and wallet cash reserve. Review holdings first — never add to a broken thesis."
         )
@@ -264,6 +306,19 @@ def upsert_lesson(
 ) -> bool:
     """Insert a lesson if not already stored. Returns True when a row was written."""
     ensure_lessons_table(conn)
+    ticker = normalize_ticker(ticker)
+    trade_date_s = trade_date.isoformat() if isinstance(trade_date, date) else str(trade_date)
+    params = (
+        ADMIN_WALLET_ID,
+        ticker,
+        trade_date_s,
+        outcome,
+        realized_pnl,
+        situation[:8000],
+        lesson[:8000],
+        source_trade_id,
+        (decision_at_entry or "")[:500],
+    )
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -274,23 +329,18 @@ def upsert_lesson(
                 ) VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (ticker, trade_date, outcome, realized_pnl) DO NOTHING
                 """,
-                (
-                    ADMIN_WALLET_ID,
-                    ticker.upper(),
-                    trade_date.isoformat() if isinstance(trade_date, date) else str(trade_date),
-                    outcome,
-                    realized_pnl,
-                    situation[:8000],
-                    lesson[:8000],
-                    source_trade_id,
-                    (decision_at_entry or "")[:500],
-                ),
+                params,
             )
             written = cur.rowcount > 0
         conn.commit()
         return written
     except Exception as exc:
-        # Unique index name may differ if only CREATE TABLE ran — try without conflict target
+        # Unique index may be missing if only CREATE TABLE ran — explicit fallback.
+        logger.info(
+            "upsert_lesson ON CONFLICT path failed for %s (%s); trying EXISTS fallback",
+            ticker,
+            exc,
+        )
         try:
             conn.rollback()
             with conn.cursor() as cur:
@@ -309,21 +359,7 @@ def upsert_lesson(
                         AND COALESCE(realized_pnl, 0) = COALESCE(%s, 0)
                     )
                     """,
-                    (
-                        ADMIN_WALLET_ID,
-                        ticker.upper(),
-                        trade_date.isoformat() if isinstance(trade_date, date) else str(trade_date),
-                        outcome,
-                        realized_pnl,
-                        situation[:8000],
-                        lesson[:8000],
-                        source_trade_id,
-                        (decision_at_entry or "")[:500],
-                        ticker,
-                        trade_date.isoformat() if isinstance(trade_date, date) else str(trade_date),
-                        outcome,
-                        realized_pnl,
-                    ),
+                    params + (ticker, trade_date_s, outcome, realized_pnl),
                 )
                 written = cur.rowcount > 0
             conn.commit()
@@ -530,68 +566,90 @@ def recent_loss_blocks_buy(
     ticker: str,
     *,
     as_of: date | None = None,
-    cooldown_days: int = RECENT_LOSS_COOLDOWN_DAYS,
+    cooldown_days: int | None = None,
 ) -> tuple[bool, str]:
-    """Hard gate: skip new BUY after a meaningful same-ticker loss inside cool-off."""
+    """Hard gate: skip new BUY after a meaningful same-ticker loss inside cool-off.
+
+    A loss is meaningful when it meets the absolute INR floor **or** the
+    percentage-of-exit-notional threshold (see ``trading_constraints``).
+    """
+    ticker = normalize_ticker(ticker)
     as_of = as_of or date.today()
+    cooldown_days = (
+        recent_loss_cooldown_days() if cooldown_days is None else cooldown_days
+    )
     cutoff = as_of - timedelta(days=cooldown_days)
     try:
         with conn.cursor() as cur:
+            # Single round-trip: portfolio ledger ∪ executor log.
             cur.execute(
                 """
-                SELECT trade_time, realized_pnl
-                FROM portfolio_trades
-                WHERE wallet_id = %s
-                  AND UPPER(ticker) = UPPER(%s)
-                  AND action = 'SELL'
-                  AND realized_pnl IS NOT NULL
-                  AND realized_pnl < %s
-                  AND trade_time::date >= %s::date
-                ORDER BY trade_time DESC
-                LIMIT 1
+                SELECT trade_day, pnl, exit_notional
+                FROM (
+                  SELECT
+                    trade_time::date AS trade_day,
+                    realized_pnl AS pnl,
+                    COALESCE(total_value, 0)::float AS exit_notional
+                  FROM portfolio_trades
+                  WHERE wallet_id = %s
+                    AND UPPER(ticker) = UPPER(%s)
+                    AND action = 'SELL'
+                    AND realized_pnl IS NOT NULL
+                    AND realized_pnl < 0
+                    AND trade_time::date >= %s::date
+                    AND trade_time::date <= %s::date
+                  UNION ALL
+                  SELECT
+                    trade_date AS trade_day,
+                    pnl,
+                    COALESCE(quantity * price, 0)::float AS exit_notional
+                  FROM ai_trade_executions
+                  WHERE wallet_id = %s
+                    AND UPPER(ticker) = UPPER(%s)
+                    AND action_taken = 'SELL'
+                    AND dry_run = false
+                    AND pnl IS NOT NULL
+                    AND pnl < 0
+                    AND trade_date >= %s::date
+                    AND trade_date <= %s::date
+                ) losses
+                ORDER BY trade_day DESC
+                LIMIT 20
                 """,
-                (ADMIN_WALLET_ID, ticker, -MIN_LOSS_INR_FOR_COOLDOWN, cutoff.isoformat()),
+                (
+                    ADMIN_WALLET_ID,
+                    ticker,
+                    cutoff.isoformat(),
+                    as_of.isoformat(),
+                    ADMIN_WALLET_ID,
+                    ticker,
+                    cutoff.isoformat(),
+                    as_of.isoformat(),
+                ),
             )
-            row = cur.fetchone()
-            if not row:
-                cur.execute(
-                    """
-                    SELECT trade_date, pnl
-                    FROM ai_trade_executions
-                    WHERE wallet_id = %s
-                      AND UPPER(ticker) = UPPER(%s)
-                      AND action_taken = 'SELL'
-                      AND dry_run = false
-                      AND pnl IS NOT NULL
-                      AND pnl < %s
-                      AND trade_date >= %s::date
-                    ORDER BY trade_date DESC, created_at DESC
-                    LIMIT 1
-                    """,
-                    (
-                        ADMIN_WALLET_ID,
-                        ticker,
-                        -MIN_LOSS_INR_FOR_COOLDOWN,
-                        cutoff.isoformat(),
-                    ),
-                )
-                row = cur.fetchone()
+            rows = cur.fetchall()
     except Exception as exc:
         _rollback_after_optional_query_error(conn, "recent_loss_blocks_buy", exc)
         return False, ""
 
-    if not row:
-        return False, ""
-    trade_time, pnl = row[0], float(row[1])
-    td = trade_time.date() if isinstance(trade_time, datetime) else trade_time
-    return True, (
-        f"recent_loss_cooldown:{ticker}:{td}:pnl={pnl:.2f}:"
-        f"wait_{cooldown_days}d"
-    )
+    for row in rows:
+        trade_day, pnl, exit_notional = row[0], float(row[1]), float(row[2] or 0)
+        if not _is_meaningful_loss(pnl, exit_notional):
+            continue
+        td = trade_day.date() if isinstance(trade_day, datetime) else trade_day
+        return True, (
+            f"recent_loss_cooldown:{ticker}:{td}:pnl={pnl:.2f}:"
+            f"wait_{cooldown_days}d"
+        )
+    return False, ""
 
 
 def portfolio_quality_blocks_new_risk(conn) -> tuple[bool, str]:
-    """Soft capital-protection gate when live expectancy is deeply negative."""
+    """Soft capital-protection gate when live expectancy is deeply negative.
+
+    Expectancy is measured in INR, then converted to a % of ``max_position_inr``
+    so the gate scales with configured position size (not a fixed Rs threshold).
+    """
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -615,7 +673,7 @@ def portfolio_quality_blocks_new_risk(conn) -> tuple[bool, str]:
     winning_trades = int(row[0] or 0)
     losing_trades = int(row[1] or 0)
     closed = winning_trades + losing_trades
-    if closed < 5:
+    if closed < quality_min_closed_trades():
         return False, ""
     gross_profit = float(row[2] or 0)
     gross_loss = float(row[3] or 0)
@@ -623,9 +681,15 @@ def portfolio_quality_blocks_new_risk(conn) -> tuple[bool, str]:
     avg_loss = gross_loss / losing_trades if losing_trades else 0.0
     win_rate = (winning_trades / closed * 100.0) if closed else 0.0
     expectancy = (win_rate / 100.0) * avg_win - (1 - win_rate / 100.0) * avg_loss
-    if win_rate < 35.0 and expectancy < -200.0:
+    max_pos = max_position_inr()
+    expectancy_pct_of_cap = (expectancy / max_pos * 100.0) if max_pos > 0 else 0.0
+    if (
+        win_rate < quality_win_rate_max_pct()
+        and expectancy_pct_of_cap < quality_expectancy_pct_of_cap()
+    ):
         return True, (
             f"portfolio_quality_gate:win_rate={win_rate:.1f}%:"
-            f"expectancy={expectancy:.0f}"
+            f"expectancy={expectancy:.0f}:"
+            f"expectancy_pct_of_cap={expectancy_pct_of_cap:.2f}"
         )
     return False, ""
