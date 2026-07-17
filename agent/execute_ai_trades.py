@@ -50,6 +50,7 @@ from portfolio_db import (
     mark_trailing_stop_triggered,
 )
 from recommendation_bucket import is_overweight, recommendation_bucket
+from trade_lessons import portfolio_quality_blocks_new_risk, recent_loss_blocks_buy
 from trading_constraints import (
     buy_transaction_charge_inr,
     max_position_inr,
@@ -328,42 +329,42 @@ def decide_and_execute(
     room_to_cap = max(0.0, max_inr - current_position_value)
 
     if bucket == "buy":
-        if hold_qty > 0 and not is_overweight(decision):
+        from datetime import date as _date
+
+        try:
+            as_of = _date.fromisoformat(str(trade_date)[:10])
+        except ValueError:
+            as_of = _date.today()
+        blocked, reason = recent_loss_blocks_buy(conn, ticker, as_of=as_of)
+        if blocked:
+            action, skip_reason = "SKIP", reason
+        elif hold_qty > 0 and not is_overweight(decision):
             action, skip_reason = "SKIP", "already_holding_no_overweight"
-        elif not fractional and room_to_cap < price:
-            action, skip_reason = "SKIP", "max_position_cap_reached"
-        elif fractional and room_to_cap < min_notional:
-            action, skip_reason = "SKIP", "max_position_cap_reached"
-        elif cash <= 0:
-            action, skip_reason = "SKIP", "insufficient_cash"
         else:
-            buy_charge = buy_transaction_charge_inr()
-            if cash <= buy_charge + min_cash_inr:
+            quality_block, quality_reason = portfolio_quality_blocks_new_risk(conn)
+            # Block fresh entries (not overweight adds) when book quality is toxic
+            if quality_block and hold_qty <= 0:
+                action, skip_reason = "SKIP", quality_reason
+            elif not fractional and room_to_cap < price:
+                action, skip_reason = "SKIP", "max_position_cap_reached"
+            elif fractional and room_to_cap < min_notional:
+                action, skip_reason = "SKIP", "max_position_cap_reached"
+            elif cash <= 0:
                 action, skip_reason = "SKIP", "insufficient_cash"
             else:
-                cash_for_trade = max(0.0, cash - buy_charge - min_cash_inr)
-                buy_value = min(cash_for_trade, room_to_cap)
-                if fractional and buy_value < min_notional:
-                    action, skip_reason = "SKIP", "below_min_crypto_notional"
-                elif not fractional and buy_value < price:
-                    action, skip_reason = "SKIP", "insufficient_cash_for_whole_share"
+                buy_charge = buy_transaction_charge_inr()
+                if cash <= buy_charge + min_cash_inr:
+                    action, skip_reason = "SKIP", "insufficient_cash"
                 else:
-                    qty = size_buy_quantity(
-                        buy_value_inr=buy_value,
-                        price_inr=price,
-                        fractional=fractional,
-                    )
-                    cost = qty * price
-                    if qty <= 0:
-                        skip = (
-                            "below_min_crypto_notional"
-                            if fractional
-                            else "insufficient_cash_for_whole_share"
-                        )
-                        action, skip_reason = "SKIP", skip
-                    elif cost + buy_charge + min_cash_inr > cash:
+                    cash_for_trade = max(0.0, cash - buy_charge - min_cash_inr)
+                    buy_value = min(cash_for_trade, room_to_cap)
+                    if fractional and buy_value < min_notional:
+                        action, skip_reason = "SKIP", "below_min_crypto_notional"
+                    elif not fractional and buy_value < price:
+                        action, skip_reason = "SKIP", "insufficient_cash_for_whole_share"
+                    else:
                         qty = size_buy_quantity(
-                            buy_value_inr=max(0.0, cash - buy_charge - min_cash_inr),
+                            buy_value_inr=buy_value,
                             price_inr=price,
                             fractional=fractional,
                         )
@@ -375,10 +376,24 @@ def decide_and_execute(
                                 else "insufficient_cash_for_whole_share"
                             )
                             action, skip_reason = "SKIP", skip
+                        elif cost + buy_charge + min_cash_inr > cash:
+                            qty = size_buy_quantity(
+                                buy_value_inr=max(0.0, cash - buy_charge - min_cash_inr),
+                                price_inr=price,
+                                fractional=fractional,
+                            )
+                            cost = qty * price
+                            if qty <= 0:
+                                skip = (
+                                    "below_min_crypto_notional"
+                                    if fractional
+                                    else "insufficient_cash_for_whole_share"
+                                )
+                                action, skip_reason = "SKIP", skip
+                            else:
+                                action = "BUY"
                         else:
                             action = "BUY"
-                    else:
-                        action = "BUY"
 
     elif bucket == "sell":
         if hold_qty <= 0:

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from tradingagents.agents.utils.swing_policy import SWING_DEBATE_REMINDER
+from tradingagents.agents.utils.swing_policy import (
+    SWING_DEBATE_REMINDER,
+    format_live_portfolio_context,
+)
 
 
 def create_aggressive_debator(llm: Any) -> Callable[[dict[str, Any]], dict[str, Any]]:
@@ -52,8 +55,11 @@ def create_aggressive_debator(llm: Any) -> Callable[[dict[str, Any]], dict[str, 
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
         trader_decision = state["trader_investment_plan"]
+        live_ctx = format_live_portfolio_context(state.get("portfolio_context", ""))
 
         prompt = f"""As the Aggressive Risk Analyst, champion high-reward, high-risk opportunities. Challenge conservative and neutral views with data-driven rebuttals.
+
+CRITICAL: Read LIVE PORTFOLIO CONTEXT first. If holdings, cash, or past losses do not support aggressive risk, say so — do not ignore the DB facts.
 
 Trader's decision: {trader_decision}
 
@@ -64,6 +70,8 @@ Company Fundamentals Report: {fundamentals_report}
 Conversation history: {history}
 Last conservative argument: {current_conservative_response}
 Last neutral argument: {current_neutral_response}
+
+{live_ctx}
 
 {SWING_DEBATE_REMINDER}
 

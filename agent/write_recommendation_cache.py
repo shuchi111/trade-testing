@@ -168,9 +168,14 @@ def fetch_last_close(symbol: str, period: str | None = None) -> float | None:
 
 _PORTFOLIO_REPORT_SUFFIX = (
     "\n\n=== LIVE REPORT REQUIREMENT ===\n"
+    "Before any Buy/Sell/Hold rating: read EVERY section above (wallet, ALL open holdings, "
+    "current ticker focus, live trades, wallet activity, AI executions, backtests, past AI "
+    "recommendations/reports, holdings discipline checklist, lessons from past mistakes, "
+    "mandatory rules). Think wisely with capital preservation first, then decide. "
     "In the final full report, include concrete portfolio and wallet observations: "
     "current position status, cash/reserve, position cap room, active trailing stop, "
-    "recent live trades, backtest evidence, and whether the decision adds risk or reduces risk."
+    "recent live trades, prior AI stance, backtest evidence, and whether the decision "
+    "adds risk or reduces risk."
 )
 
 
@@ -549,6 +554,23 @@ def run_single_recommendation(
 
         try:
             ta = TradingAgentsGraph(debug=debug, config=cfg)
+            try:
+                from trade_lessons import load_lessons, seed_agent_memories
+
+                lessons = load_lessons(conn, ticker=ticker, limit=8)
+                wallet_losses = load_lessons(conn, limit=6, losses_only=True)
+                # Prefer ticker lessons; pad with wallet losses for scar tissue
+                seen = {(L.get("ticker"), L.get("trade_date"), L.get("realized_pnl")) for L in lessons}
+                for L in wallet_losses:
+                    key = (L.get("ticker"), L.get("trade_date"), L.get("realized_pnl"))
+                    if key not in seen:
+                        lessons.append(L)
+                        seen.add(key)
+                seeded = seed_agent_memories(ta, lessons[:12])
+                if seeded:
+                    logger.info("Seeded %s past-mistake memories for %s", seeded, ticker)
+            except Exception as mem_err:
+                logger.warning("Could not seed trade lessons for %s: %s", ticker, mem_err)
             final_state, decision = _propagate_with_retry(
                 ta, ticker, trade_date, portfolio_context
             )

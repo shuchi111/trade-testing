@@ -170,7 +170,7 @@ def portfolio_value(conn, prices: dict[str, float]) -> float:
     return cash + holdings_val
 
 
-def load_recent_portfolio_trades(conn, ticker: str, limit: int = 5) -> list[dict[str, Any]]:
+def load_recent_portfolio_trades(conn, ticker: str, limit: int = 20) -> list[dict[str, Any]]:
     """Recent live paper trades for one ticker."""
     try:
         with conn.cursor() as cur:
@@ -234,7 +234,7 @@ def current_open_position_since(conn, ticker: str) -> date | None:
     return since
 
 
-def load_recent_wallet_trades(conn, limit: int = 10) -> list[dict[str, Any]]:
+def load_recent_wallet_trades(conn, limit: int = 25) -> list[dict[str, Any]]:
     """Recent live paper trades across the whole wallet."""
     try:
         with conn.cursor() as cur:
@@ -522,12 +522,14 @@ def mark_trailing_stop_triggered(conn, stop_id: str) -> None:
         )
 
 
-def load_recent_ai_recommendations(conn, ticker: str, limit: int = 8) -> list[dict[str, Any]]:
+def load_recent_ai_recommendations(conn, ticker: str, limit: int = 12) -> list[dict[str, Any]]:
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT trade_date, decision, bucket, reference_price
+                SELECT trade_date, decision, bucket, reference_price,
+                       COALESCE(final_trade_decision, ''),
+                       LEFT(COALESCE(full_report, ''), 400)
                 FROM ai_recommendation_history
                 WHERE UPPER(ticker) = UPPER(%s)
                 ORDER BY trade_date DESC, computed_at DESC
@@ -537,14 +539,34 @@ def load_recent_ai_recommendations(conn, ticker: str, limit: int = 8) -> list[di
             )
             rows = cur.fetchall()
     except Exception as exc:
-        _rollback_after_optional_query_error(conn, "load_recent_ai_recommendations", exc)
-        return []
+        # Older schemas may lack full_report — fall back to core columns.
+        try:
+            conn.rollback()
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT trade_date, decision, bucket, reference_price,
+                           COALESCE(final_trade_decision, ''), ''
+                    FROM ai_recommendation_history
+                    WHERE UPPER(ticker) = UPPER(%s)
+                    ORDER BY trade_date DESC, computed_at DESC
+                    LIMIT %s
+                    """,
+                    (ticker, limit),
+                )
+                rows = cur.fetchall()
+        except Exception as exc2:
+            _rollback_after_optional_query_error(conn, "load_recent_ai_recommendations", exc2)
+            logger.warning("load_recent_ai_recommendations primary failed: %s", exc)
+            return []
     return [
         {
             "trade_date": r[0],
             "decision": r[1] or "",
             "bucket": r[2] or "",
             "reference_price": None if r[3] is None else float(r[3]),
+            "final_trade_decision": r[4] or "",
+            "report_excerpt": (r[5] or "").strip(),
         }
         for r in rows
     ]
@@ -705,8 +727,11 @@ def build_analysis_context(
     held_days = days_held(conn, ticker, as_of)
 
     lines: list[str] = [
-        "=== WEBSITE CONTEXT COVERAGE ===",
-        "Use every section below as if reviewing the website tabs before deciding: wallet, holdings, holding dates, live trades, backtests, prior AI history, active stops, and mandatory rules.",
+        "=== WEBSITE / DATABASE CONTEXT (AUTHORITATIVE — AGENTS MUST READ EVERY SECTION) ===",
+        "This block is loaded from the live DB as shown on the website tabs: wallet, holdings,",
+        "holding dates, live trades, wallet activity, AI executions, backtests, prior AI",
+        "recommendations/reports, discipline checklist, and lessons from past mistakes.",
+        "Complete the checklist mentally, think carefully, THEN decide. Do not invent holdings.",
         "",
         "=== LIVE PORTFOLIO ===",
     ]
@@ -914,12 +939,61 @@ def build_analysis_context(
 
     recos = load_recent_ai_recommendations(conn, ticker)
     lines.append("")
-    lines.append("=== PAST AI RECOMMENDATIONS ===")
+    lines.append("=== PAST AI RECOMMENDATIONS (reports / stance history) ===")
     if recos:
         for r in recos:
-            lines.append(f"{r['trade_date']} {r['decision']} (bucket={r['bucket']})")
+            price_bit = (
+                f" ref={_fmt_inr(r['reference_price'])}"
+                if r.get("reference_price") is not None
+                else ""
+            )
+            lines.append(
+                f"{r['trade_date']} {r['decision']} (bucket={r['bucket']}){price_bit}"
+            )
+            excerpt = (r.get("report_excerpt") or "").replace("\n", " ").strip()
+            if excerpt:
+                lines.append(f"  report: {excerpt[:280]}")
     else:
         lines.append("No prior AI recommendation history.")
+
+    lines.append("")
+    lines.append("=== HOLDINGS DISCIPLINE CHECKLIST (complete before any BUY) ===")
+    open_count = len(all_holdings)
+    underwater = 0
+    for h in all_holdings:
+        mark = all_prices.get(h["ticker"]) or h["avg_entry"]
+        if mark < h["avg_entry"]:
+            underwater += 1
+    lines.append(
+        f"Open names={open_count}, underwater marks={underwater}, "
+        f"cash={_fmt_inr(cash)}, focus held_days={held_days if held_days is not None else 'n/a'}."
+    )
+    if qty > 0:
+        lines.append(
+            f"Already holding {ticker}: do NOT recommend fresh BUY unless OVERWEIGHT with "
+            f"explicit cap room {_fmt_inr(room_to_cap)} and repaired weekly thesis."
+        )
+    else:
+        lines.append(
+            f"No open lot in {ticker}: new BUY only if wallet reserve, per-stock cap, "
+            "and lessons/cool-off allow it."
+        )
+    if underwater >= 3:
+        lines.append(
+            "WARNING: multiple underwater holdings — prefer HOLD / reduce risk; "
+            "do not spray new BUYs across the book."
+        )
+
+    try:
+        from trade_lessons import format_lessons_block
+
+        lines.append("")
+        lines.append(format_lessons_block(conn, ticker=ticker))
+    except Exception as exc:
+        _rollback_after_optional_query_error(conn, "format_lessons_block", exc)
+        lines.append("")
+        lines.append("=== LESSONS FROM PAST MISTAKES ===")
+        lines.append("Lessons unavailable this run — still avoid revenge trades after losses.")
 
     lines.append("")
     lines.append("=== MANDATORY TRADING RULES (executor enforces these) ===")
@@ -941,7 +1015,12 @@ def build_analysis_context(
         "do not churn like losing backtest strategies with many small whipsaw trades."
     )
     lines.append(
-        "- Analyse deeply: tie Rating to backtest evidence, live hold duration, and past AI stance consistency."
+        "- Analyse deeply: tie Rating to backtest evidence, live hold duration, past AI reports, "
+        "and LESSONS FROM PAST MISTAKES. Capital first."
+    )
+    lines.append(
+        "- After a realized loss on this ticker, cool off before re-buying "
+        "(executor also enforces a recent-loss cooldown)."
     )
 
     return "\n".join(lines)

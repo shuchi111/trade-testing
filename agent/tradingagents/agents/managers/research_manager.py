@@ -3,7 +3,10 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from tradingagents.agents.utils.agent_utils import build_instrument_context
-from tradingagents.agents.utils.swing_policy import SWING_DEBATE_REMINDER
+from tradingagents.agents.utils.swing_policy import (
+    SWING_DEBATE_REMINDER,
+    format_live_portfolio_context,
+)
 
 
 def create_research_manager(llm: Any, memory: Any) -> Callable[[dict[str, Any]], dict[str, Any]]:
@@ -53,6 +56,7 @@ def create_research_manager(llm: Any, memory: Any) -> Callable[[dict[str, Any]],
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
         investment_debate_state = state["investment_debate_state"]
+        live_ctx = format_live_portfolio_context(state.get("portfolio_context", ""))
 
         curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
         past_memories = memory.get_memories(curr_situation, n_matches=2)
@@ -60,18 +64,24 @@ def create_research_manager(llm: Any, memory: Any) -> Callable[[dict[str, Any]],
 
         prompt = f"""As the portfolio manager and debate facilitator, critically evaluate this round of debate and make a definitive decision: align with the bear analyst, the bull analyst, or choose Hold only if strongly justified.
 
+PROCESS: (1) Read LIVE PORTFOLIO CONTEXT fully (holdings, trades, past AI decisions, lessons). (2) Weigh bull vs bear. (3) Think wisely — capital first. (4) Write one weekly swing PLAN.
+
 Develop a concise investment PLAN for ONE weekly swing horizon (Buy / Sell / Hold family with directional nuance).
 
 {SWING_DEBATE_REMINDER}
 
 Write plain text only (no Markdown headings, bullets with asterisks, or tables).
 
+{live_ctx}
+
 Past reflections: "{past_memory_str}"
 
 {instrument_context}
 
 Debate History:
-{history}"""
+{history}
+
+After the checklist, state whether we already hold this name and how that changes the plan."""
 
         response = llm.invoke(prompt)
 

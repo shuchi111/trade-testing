@@ -4,7 +4,10 @@ from typing import Any, Callable
 
 from langchain_core.messages import AIMessage  # noqa: F401 — re-exported for consumers
 
-from tradingagents.agents.utils.swing_policy import SWING_DEBATE_REMINDER
+from tradingagents.agents.utils.swing_policy import (
+    SWING_DEBATE_REMINDER,
+    format_live_portfolio_context,
+)
 
 
 def create_bull_researcher(llm: Any, memory: Any) -> Callable[[dict[str, Any]], dict[str, Any]]:
@@ -59,8 +62,11 @@ def create_bull_researcher(llm: Any, memory: Any) -> Callable[[dict[str, Any]], 
         curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
         past_memories = memory.get_memories(curr_situation, n_matches=2)
         past_memory_str = "".join(rec["recommendation"] + "\n\n" for rec in past_memories)
+        live_ctx = format_live_portfolio_context(state.get("portfolio_context", ""))
 
         prompt = f"""You are a Bull Analyst advocating for investing in the stock. Build a strong, evidence-based case emphasizing growth potential, competitive advantages, and positive market indicators.
+
+CRITICAL: First read LIVE PORTFOLIO CONTEXT (holdings, live trades, past AI decisions, lessons). Do not recommend BUY if holdings, cool-off lessons, or past losses contradict — acknowledge those constraints even while arguing the bull case.
 
 Resources available:
 Market research report: {market_research_report}
@@ -70,6 +76,8 @@ Company fundamentals report: {fundamentals_report}
 Conversation history: {history}
 Last bear argument: {current_response}
 Reflections from similar situations: {past_memory_str}
+
+{live_ctx}
 
 {SWING_DEBATE_REMINDER}
 """

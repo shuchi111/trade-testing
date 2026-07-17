@@ -4,7 +4,10 @@ from typing import Any, Callable
 
 from langchain_core.messages import AIMessage  # noqa: F401 — re-exported for consumers
 
-from tradingagents.agents.utils.swing_policy import SWING_DEBATE_REMINDER
+from tradingagents.agents.utils.swing_policy import (
+    SWING_DEBATE_REMINDER,
+    format_live_portfolio_context,
+)
 
 
 def create_bear_researcher(llm: Any, memory: Any) -> Callable[[dict[str, Any]], dict[str, Any]]:
@@ -58,8 +61,11 @@ def create_bear_researcher(llm: Any, memory: Any) -> Callable[[dict[str, Any]], 
         curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
         past_memories = memory.get_memories(curr_situation, n_matches=2)
         past_memory_str = "".join(rec["recommendation"] + "\n\n" for rec in past_memories)
+        live_ctx = format_live_portfolio_context(state.get("portfolio_context", ""))
 
         prompt = f"""You are a Bear Analyst making the case against investing in the stock. Present a well-reasoned argument emphasizing risks, challenges, and negative indicators.
+
+CRITICAL: First read LIVE PORTFOLIO CONTEXT (holdings underwater, live trade losses, past AI mistakes, cool-off lessons). Use those DB facts as primary risk evidence — do not ignore them.
 
 Resources available:
 Market research report: {market_research_report}
@@ -69,6 +75,8 @@ Company fundamentals report: {fundamentals_report}
 Conversation history: {history}
 Last bull argument: {current_response}
 Reflections from similar situations: {past_memory_str}
+
+{live_ctx}
 
 {SWING_DEBATE_REMINDER}
 """
