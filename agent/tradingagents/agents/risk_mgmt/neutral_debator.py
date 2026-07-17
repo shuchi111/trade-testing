@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from tradingagents.agents.utils.swing_policy import SWING_DEBATE_REMINDER
+from tradingagents.agents.utils.swing_policy import (
+    SWING_DEBATE_REMINDER,
+    format_live_portfolio_context,
+)
 
 
 def create_neutral_debator(llm: Any) -> Callable[[dict[str, Any]], dict[str, Any]]:
@@ -51,8 +54,11 @@ def create_neutral_debator(llm: Any) -> Callable[[dict[str, Any]], dict[str, Any
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
         trader_decision = state["trader_investment_plan"]
+        live_ctx = format_live_portfolio_context(state.get("portfolio_context", ""))
 
         prompt = f"""As the Neutral Risk Analyst, provide a balanced perspective weighing both potential benefits and risks. Challenge both aggressive and conservative analysts.
+
+CRITICAL: Read LIVE PORTFOLIO CONTEXT first. Balance opportunity vs the real book (holdings, trades, past decisions, lessons) before taking a side.
 
 Trader's decision: {trader_decision}
 
@@ -63,6 +69,8 @@ Company Fundamentals Report: {fundamentals_report}
 Conversation history: {history}
 Last aggressive argument: {current_aggressive_response}
 Last conservative argument: {current_conservative_response}
+
+{live_ctx}
 
 {SWING_DEBATE_REMINDER}
 

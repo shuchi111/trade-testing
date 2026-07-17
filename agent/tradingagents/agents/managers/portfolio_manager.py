@@ -3,7 +3,10 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from tradingagents.agents.utils.agent_utils import build_instrument_context
-from tradingagents.agents.utils.swing_policy import SWING_MANAGERS_BLOCK
+from tradingagents.agents.utils.swing_policy import (
+    SWING_MANAGERS_BLOCK,
+    format_live_portfolio_context,
+)
 
 
 def create_portfolio_manager(llm: Any, memory: Any) -> Callable[[dict[str, Any]], dict[str, Any]]:
@@ -70,13 +73,22 @@ def create_portfolio_manager(llm: Any, memory: Any) -> Callable[[dict[str, Any]]
         portfolio_context = state.get("portfolio_context", "") or (
             f"No open position in {state['company_of_interest']}."
         )
+        live_ctx = format_live_portfolio_context(portfolio_context)
 
         curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
         past_memories = memory.get_memories(curr_situation, n_matches=2)
         past_memory_str = "".join(rec["recommendation"] + "\n\n" for rec in past_memories)
 
-        prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and \
-deliver the final trading decision.
+        prompt = f"""As the Portfolio Manager with 20+ years of swing-trading experience, \
+synthesize the risk analysts' debate and deliver the final trading decision.
+
+CRITICAL PROCESS (do in order):
+1) Read the FULL LIVE PORTFOLIO CONTEXT (DB: holdings, trades, past AI decisions, backtests, lessons).
+2) Cross-check the trader plan and risk debate against that context.
+3) Think carefully about capital risk — then decide Buy / Overweight / Hold / Underweight / Sell.
+Never decide from analyst narrative alone while ignoring holdings or past losses.
+
+{SWING_MANAGERS_BLOCK}
 
 {instrument_context}
 
@@ -89,10 +101,10 @@ Hold: Maintain, no churn this week unless thesis broke
 Underweight: Reduce partly
 Sell: Exit or avoid entry
 
-Context (must weight all of this; holdings define basis for percent math when applicable):
-Current position and holdings summary: {portfolio_context}
+{live_ctx}
+
 Trader proposed plan (verbatim reference): {trader_plan}
-Lessons from past decisions: {past_memory_str}
+Lessons from past decisions (memory): {past_memory_str}
 
 **Required Output Structure:**
 1. **Rating**: State one of Buy / Overweight / Hold / Underweight / Sell.
@@ -111,9 +123,13 @@ Position sizing: prose (how heavy or light; respect swing, holdings basis, and t
 Key risk levels: prose (including the mandatory 5% trailing stop, wallet reserve, and thesis-break ideas).
 Time horizon: prose (multi-week swing; not day-trade framing).
 
-Investment thesis: detailed reasoning in one or more paragraphs anchored in the debate, fundamentals, and market context; explicitly tie to holdings and average entry when provided.
+Investment thesis: detailed reasoning in one or more paragraphs; explicitly cite holdings status, \
+at least one live-trade or past-AI fact, and LESSONS FROM PAST MISTAKES when relevant.
 
-Backtest and live trade review: summarise what the backtest strategy summary, backtest trade dates, and live trade history in portfolio context imply for this week's rating. Cite specific backtest entry/exit dates when warning against whipsaw. State days held and where the holding sits inside the ninety-day swing exit window when recommending any exit.
+Context review (required short paragraph): confirm you checked wallet/holdings/trades/past AI \
+decisions/backtests/lessons and state the key constraint that shaped today's rating.
+
+Backtest and live trade review: summarise what the backtest strategy summary, backtest trade dates, live trade history, AI execution history, and past reports in portfolio context imply for this week's rating. Cite specific backtest entry/exit dates when warning against whipsaw. State days held and where the holding sits inside the ninety-day swing exit window when recommending any exit.
 
 Weekly candles tie-in: how multi-week candle structure supports or contradicts the stance (pattern names in plain words).
 
@@ -121,18 +137,18 @@ GTT target price: INR value and one sentence (tie to >3% gain versus basis when 
 
 GTT stop price: INR value and one sentence (use the mandatory 5% trailing stop distance, not a 10% discretionary stop).
 
-Risk/reward ratio: numeric ratio using target reward divided by stop risk (example 1.50).
+Risk/reward ratio: numeric ratio using target reward divided by stop risk (example 1.50). Prefer HOLD if below 1.50.
 
 AI confidence: percentage from 0% to 100% and one short reason.
 
-When you write the final answer, reproduce the section labels above verbatim (Rating:, Executive summary:, then Action plan:, Entry strategy:, Position sizing:, Key risk levels:, Time horizon:, then Investment thesis:, Backtest and live trade review:, Weekly candles tie-in:, GTT target price:, GTT stop price:, Risk/reward ratio:, AI confidence:) and fill in real content—do not leave the template placeholders.
+When you write the final answer, reproduce the section labels above verbatim (Rating:, Executive summary:, then Action plan:, Entry strategy:, Position sizing:, Key risk levels:, Time horizon:, then Investment thesis:, Context review:, Backtest and live trade review:, Weekly candles tie-in:, GTT target price:, GTT stop price:, Risk/reward ratio:, AI confidence:) and fill in real content—do not leave the template placeholders.
 
 Risk Analysts Debate History:
 {history}
 
 ---
 
-Be decisive and ground every conclusion in specific evidence from the analysts."""
+Be decisive only after the DB checklist. Ground every conclusion in holdings, trade history, past decisions, and analyst evidence."""
 
         response = llm.invoke(prompt)
 

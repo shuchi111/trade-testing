@@ -4,7 +4,10 @@ from typing import Any, Callable
 
 from langchain_core.messages import AIMessage  # noqa: F401 — re-exported for consumers
 
-from tradingagents.agents.utils.swing_policy import SWING_DEBATE_REMINDER
+from tradingagents.agents.utils.swing_policy import (
+    SWING_DEBATE_REMINDER,
+    format_live_portfolio_context,
+)
 
 
 def create_conservative_debator(llm: Any) -> Callable[[dict[str, Any]], dict[str, Any]]:
@@ -54,8 +57,11 @@ def create_conservative_debator(llm: Any) -> Callable[[dict[str, Any]], dict[str
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
         trader_decision = state["trader_investment_plan"]
+        live_ctx = format_live_portfolio_context(state.get("portfolio_context", ""))
 
         prompt = f"""As the Conservative Risk Analyst, protect assets and minimize volatility. Critically examine high-risk elements and advocate for low-risk alternatives.
+
+CRITICAL: Read LIVE PORTFOLIO CONTEXT first (underwater holdings, recent losses, past AI mistakes, cash reserve). Use those DB facts as your primary capital-protection evidence.
 
 Trader's decision: {trader_decision}
 
@@ -66,6 +72,8 @@ Company Fundamentals Report: {fundamentals_report}
 Conversation history: {history}
 Last aggressive argument: {current_aggressive_response}
 Last neutral argument: {current_neutral_response}
+
+{live_ctx}
 
 {SWING_DEBATE_REMINDER}
 

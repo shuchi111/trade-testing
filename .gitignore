@@ -33,6 +33,9 @@ agent/env/
 # --- Secrets / local env (never commit) ---
 .env
 .env.*
+.env*.local
+.env*
+!.env.example
 !env.example
 
 # --- OS / editor ---

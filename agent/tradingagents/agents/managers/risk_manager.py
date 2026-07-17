@@ -17,7 +17,10 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from tradingagents.agents.utils.agent_utils import build_instrument_context
-from tradingagents.agents.utils.swing_policy import SWING_MANAGERS_BLOCK
+from tradingagents.agents.utils.swing_policy import (
+    SWING_MANAGERS_BLOCK,
+    format_live_portfolio_context,
+)
 
 
 def create_risk_manager(llm: Any, memory: Any) -> Callable[[dict[str, Any]], dict[str, Any]]:
@@ -54,6 +57,7 @@ def create_risk_manager(llm: Any, memory: Any) -> Callable[[dict[str, Any]], dic
         portfolio_context = state.get("portfolio_context", "") or (
             f"No open position in {state['company_of_interest']}."
         )
+        live_ctx = format_live_portfolio_context(portfolio_context)
 
         curr_situation = (
             f"{market_research_report}\n\n{sentiment_report}\n\n"
@@ -65,12 +69,14 @@ def create_risk_manager(llm: Any, memory: Any) -> Callable[[dict[str, Any]], dic
         prompt = f"""As the Risk Manager, judge the risk analysts' debate and translate \
 the trader's plan into a risk-aware intermediate decision.
 
+PROCESS: Read LIVE PORTFOLIO CONTEXT fully first, then debate evidence, then think, then verdict.
+
 {instrument_context}
 
 {SWING_MANAGERS_BLOCK}
 
-Context you must weigh (holdings define the basis for percent math when applicable):
-Current position and holdings summary: {portfolio_context}
+{live_ctx}
+
 Trader proposed plan (verbatim reference): {trader_plan}
 Lessons from past decisions: {past_memory_str}
 
@@ -79,7 +85,7 @@ Risk Analysts Debate History:
 
 Produce a concise plain-text risk verdict covering:
 1. Risk verdict: one of Lower / Maintain / Raise exposure for this name this week.
-2. Key risks: the most material downside scenarios from the debate (margin, leverage, news, technical breaks).
+2. Key risks: the most material downside scenarios from the debate (margin, leverage, news, technical breaks) plus holdings/trade-history risks from the DB context.
 3. Position-sizing guidance: respect the twenty-five thousand INR cap and the mandatory 5% trailing stop.
 4. Conditions to invalidate: what would flip the verdict next week.
 

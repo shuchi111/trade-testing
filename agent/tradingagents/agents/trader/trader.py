@@ -4,7 +4,10 @@ import functools
 from typing import Any, Callable
 
 from tradingagents.agents.utils.agent_utils import build_instrument_context
-from tradingagents.agents.utils.swing_policy import SWING_MANAGERS_BLOCK
+from tradingagents.agents.utils.swing_policy import (
+    SWING_MANAGERS_BLOCK,
+    format_live_portfolio_context,
+)
 
 
 def create_trader(llm: Any, memory: Any) -> Callable[[dict[str, Any]], dict[str, Any]]:
@@ -68,6 +71,7 @@ def create_trader(llm: Any, memory: Any) -> Callable[[dict[str, Any]], dict[str,
             f"Portfolio tracker: no quantity held reported for {company_name}. "
             "Use fundamentals and risk only — this is reporting, not a prompt to trade."
         )
+        live_ctx = format_live_portfolio_context(portfolio_context)
 
         curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
         past_memories = memory.get_memories(curr_situation, n_matches=2)
@@ -83,7 +87,9 @@ def create_trader(llm: Any, memory: Any) -> Callable[[dict[str, Any]], dict[str,
                 "Based on a comprehensive analysis by a team of analysts, here is "
                 f"an investment plan tailored for {company_name}. {instrument_context} "
                 f"Proposed Investment Plan: {investment_plan}\n\n"
-                "Leverage these insights to make an informed and strategic decision."
+                "Leverage these insights to make an informed and strategic decision. "
+                "First finish the mandatory DB/dashboard checklist in the system prompt, "
+                "then think carefully, then decide."
             ),
         }
 
@@ -92,12 +98,16 @@ def create_trader(llm: Any, memory: Any) -> Callable[[dict[str, Any]], dict[str,
                 "role": "system",
                 "content": (
                     f"{SWING_MANAGERS_BLOCK}\n\n"
-                    "You are a swing-trading specialist. Produce plain text only "
-                    "(no Markdown, no HTML). Honor the portfolio/holdings line as the "
-                    "basis when quantities and average entry are given.\n"
-                    "Current position and holdings: "
-                    f"{portfolio_context}\nPast reflections:\n{past_memory_str}\n\n"
-                    "Give one recommendation tied to ONE decision for the WEEK. End with a line exactly: "
+                    "You are a 20+ year professional swing trader. Produce plain text only "
+                    "(no Markdown, no HTML). You MUST read the full LIVE PORTFOLIO CONTEXT "
+                    "(holdings, trades, past AI decisions, backtests, lessons) before any "
+                    "proposal. Prefer HOLD when edge is unclear — capital preservation first.\n\n"
+                    f"{live_ctx}\n\n"
+                    f"Past reflections / scar tissue:\n{past_memory_str}\n\n"
+                    "After analysing ALL of the above, think wisely and give ONE recommendation "
+                    "for the WEEK. Explicitly mention: (a) whether we already hold this ticker, "
+                    "(b) one fact from live trade or past AI history, (c) one lesson if present. "
+                    "End with a line exactly: "
                     "FINAL TRANSACTION PROPOSAL: one of BUY / OVERWEIGHT / HOLD / UNDERWEIGHT / SELL "
                     "(capitalized, single phrase after the colon)."
                 ),
