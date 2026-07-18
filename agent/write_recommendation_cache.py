@@ -511,6 +511,10 @@ def run_single_recommendation(
         ``{"ok": bool, "ticker": str, ...}`` with ``error`` when failed.
     """
     ticker = ticker.strip().upper()
+
+    if holding_quantity < 0 or holding_avg_entry < 0:
+        return {"ok": False, "error": "holding_quantity and holding_avg_entry must be >= 0", "ticker": ticker}
+
     cfg = _build_config()
     if not cfg.get("api_key"):
         return {
@@ -522,9 +526,6 @@ def run_single_recommendation(
     db_url = resolve_psycopg2_url()
     if not db_url:
         return {"ok": False, "error": "Missing DIRECT_URL or DATABASE_URL", "ticker": ticker}
-
-    if holding_quantity < 0 or holding_avg_entry < 0:
-        return {"ok": False, "error": "holding_quantity and holding_avg_entry must be >= 0", "ticker": ticker}
 
     try:
         snapshot = require_fresh_market_snapshot(ticker, trade_date)

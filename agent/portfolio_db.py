@@ -214,6 +214,45 @@ def load_active_trailing_stop(conn, ticker: str) -> dict[str, Any] | None:
     }
 
 
+def evaluate_trailing_stop(conn, ticker: str, current_price: float) -> dict[str, Any] | None:
+    """Update active stop on new highs; return breach details when stop is hit."""
+    stop = load_active_trailing_stop(conn, ticker)
+    if not stop or current_price <= 0:
+        return None
+
+    if current_price <= stop["current_stop_price"]:
+        return {"status": "BREACHED", **stop}
+
+    highest = max(stop["highest_price"], current_price)
+    pct = stop["trailing_pct"] or TRAILING_STOP_LOSS_PCT
+    next_stop = round(highest * (1 - pct / 100.0), 4)
+    if highest != stop["highest_price"] or next_stop != stop["current_stop_price"]:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE portfolio_trailing_stops
+                   SET highest_price = %s, current_stop_price = %s, updated_at = now()
+                 WHERE id = %s
+                """,
+                (highest, next_stop, stop["id"]),
+            )
+        conn.commit()
+        stop = {**stop, "highest_price": highest, "current_stop_price": next_stop}
+    return {"status": "ACTIVE", **stop}
+
+
+def mark_trailing_stop_triggered(conn, stop_id: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE portfolio_trailing_stops
+               SET status = 'TRIGGERED', closed_at = now(), updated_at = now()
+             WHERE id = %s
+            """,
+            (stop_id,),
+        )
+
+
 def load_recent_wallet_trades(conn, limit: int = 10) -> list[dict[str, Any]]:
     try:
         with conn.cursor() as cur:
