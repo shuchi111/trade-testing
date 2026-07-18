@@ -6,6 +6,15 @@ agent/results/
 agent/tradingagents/reports/
 agent/tradingagents/results/
 
+# Swing agent copy (agent-swing/) — same runtime artifacts
+agent-swing/tradingagents/dataflows/data_cache/*
+!agent-swing/tradingagents/dataflows/data_cache/.gitkeep
+agent-swing/eval_results/
+agent-swing/results/
+agent-swing/tradingagents/reports/
+agent-swing/tradingagents/results/
+agent-swing/backtest/.cache/
+
 # Accidental copies from private swing-trader (not used by cron)
 agent/backtest/
 agent/tests/
