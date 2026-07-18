@@ -38,6 +38,9 @@ env/
 agent/.venv/
 agent/venv/
 agent/env/
+agent-swing/.venv/
+agent-swing/venv/
+agent-swing/env/
 
 # --- Secrets / local env (never commit) ---
 .env
@@ -46,6 +49,17 @@ agent/env/
 .env*
 !.env.example
 !env.example
+*.pem
+*.p12
+*.pfx
+*.key
+id_rsa
+id_rsa.pub
+credentials.json
+**/credentials.json
+**/service-account*.json
+**/secrets.json
+.secrets/
 
 # --- OS / editor ---
 .DS_Store
