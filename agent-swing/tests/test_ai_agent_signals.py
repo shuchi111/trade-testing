@@ -1,4 +1,5 @@
 """Unit tests for AI agent DB → VectorBT signal conversion (no network)."""
+
 from __future__ import annotations
 
 import sys

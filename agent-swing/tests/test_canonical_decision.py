@@ -15,10 +15,7 @@ from tradingagents.graph.signal_processing import coerce_decision_token
 
 
 def test_rating_line_wins_over_extractor_token():
-    report = (
-        "Consider adding on dips. Rating: Hold\n\n"
-        "Executive summary: wait for confirmation."
-    )
+    report = "Consider adding on dips. Rating: Hold\n\nExecutive summary: wait for confirmation."
     assert coerce_decision_token("BUY", report) == "HOLD"
     assert resolve_canonical_decision("BUY", report) == "HOLD"
 

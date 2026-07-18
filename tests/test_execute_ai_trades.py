@@ -56,7 +56,11 @@ class DecideAndExecuteTests(unittest.TestCase):
             patch.object(execute_ai_trades, "min_wallet_cash_reserve_inr", return_value=0.0),
             patch.object(execute_ai_trades, "buy_transaction_charge_inr", return_value=0.0),
             patch.object(execute_ai_trades, "execute_trade", Mock()),
-            patch.object(execute_ai_trades, "log_execution", side_effect=lambda *args, **kwargs: logged.append(kwargs)),
+            patch.object(
+                execute_ai_trades,
+                "log_execution",
+                side_effect=lambda *args, **kwargs: logged.append(kwargs),
+            ),
         ]
         return patches, logged
 

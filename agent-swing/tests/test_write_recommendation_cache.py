@@ -39,6 +39,7 @@ from write_recommendation_cache import (
 # _adjust_to_last_trading_day
 # ---------------------------------------------------------------------------
 
+
 class TestAdjustToLastTradingDay(unittest.TestCase):
     def test_monday_unchanged(self):
         # 2024-06-03 is a Monday
@@ -59,6 +60,7 @@ class TestAdjustToLastTradingDay(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # _is_buy_signal
 # ---------------------------------------------------------------------------
+
 
 class TestIsBuySignal(unittest.TestCase):
     def test_exact_buy(self):
@@ -95,6 +97,7 @@ class TestIsBuySignal(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # _extract_signal_metrics — positive-only guard for parsed levels
 # ---------------------------------------------------------------------------
+
 
 class TestExtractSignalMetrics(unittest.TestCase):
     def test_literal_zero_levels_fall_back_and_never_store_zero(self):
@@ -153,6 +156,7 @@ class TestExtractSignalMetrics(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # upsert_cache_row
 # ---------------------------------------------------------------------------
+
 
 class TestInsertCacheRow(unittest.TestCase):
     """Tests for upsert_cache_row (append-only INSERT)."""
@@ -261,9 +265,18 @@ class TestInsertCacheRow(unittest.TestCase):
 # run_single_recommendation error paths
 # ---------------------------------------------------------------------------
 
+
 class TestRunSingleRecommendationErrors(unittest.TestCase):
     def test_missing_api_key(self):
-        with patch.dict(os.environ, {"Z_API_KEY": "", "GLM_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "", "ANTHROPIC_API_KEY": ""}):
+        with patch.dict(
+            os.environ,
+            {
+                "Z_API_KEY": "",
+                "GLM_API_KEY": "",
+                "ANTHROPIC_AUTH_TOKEN": "",
+                "ANTHROPIC_API_KEY": "",
+            },
+        ):
             result = run_single_recommendation(
                 ticker="TCS.NS",
                 trade_date="2024-06-01",

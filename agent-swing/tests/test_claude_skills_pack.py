@@ -1,4 +1,5 @@
 """Unit tests for Claude Skills Pack screeners + connected consensus (no network)."""
+
 from __future__ import annotations
 
 import sys

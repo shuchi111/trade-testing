@@ -58,7 +58,9 @@ class SymbolUtilsTests(unittest.TestCase):
             def info(self):
                 raise RuntimeError("vendor down")
 
-        with patch.object(symbol_utils, "yf", types.SimpleNamespace(Ticker=lambda symbol: FailingTicker())):
+        with patch.object(
+            symbol_utils, "yf", types.SimpleNamespace(Ticker=lambda symbol: FailingTicker())
+        ):
             self.assertEqual(resolve_instrument_identity("TCS.NS"), {})
 
 

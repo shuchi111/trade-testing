@@ -1,4 +1,5 @@
 """Unit tests for trade_lessons risk gates and lesson helpers."""
+
 from __future__ import annotations
 
 import sys
@@ -160,9 +161,7 @@ class HarvestToBuyGateFlowTests(unittest.TestCase):
         cur.rowcount = 1
 
         with (
-            patch.object(
-                trade_lessons, "load_closed_sells_for_reflection", return_value=[trade]
-            ),
+            patch.object(trade_lessons, "load_closed_sells_for_reflection", return_value=[trade]),
             patch.object(trade_lessons, "_prior_buy_decision", return_value="BUY"),
             patch.object(trade_lessons, "_prior_report_snippet", return_value=""),
             patch.object(trade_lessons, "ensure_lessons_table"),

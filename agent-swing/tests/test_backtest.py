@@ -2,6 +2,7 @@
 
 No network or database — uses mocks and synthetic price data.
 """
+
 from __future__ import annotations
 
 import math
@@ -169,9 +170,7 @@ class TestComputeSignalAccuracy(unittest.TestCase):
 
     def test_empty_price_series(self):
         price = pd.Series(dtype=float)
-        recs = pd.DataFrame(
-            [{"trade_date": pd.Timestamp("2024-01-01"), "bucket": "buy"}]
-        )
+        recs = pd.DataFrame([{"trade_date": pd.Timestamp("2024-01-01"), "bucket": "buy"}])
 
         result = compute_signal_accuracy(recs, price)
 
@@ -181,10 +180,12 @@ class TestComputeSignalAccuracy(unittest.TestCase):
 
     def test_hold_and_unknown_buckets_ignored(self):
         price = self._price_series()
-        recs = pd.DataFrame([
-            {"trade_date": price.index[0], "bucket": "hold"},
-            {"trade_date": price.index[1], "bucket": "unknown"},
-        ])
+        recs = pd.DataFrame(
+            [
+                {"trade_date": price.index[0], "bucket": "hold"},
+                {"trade_date": price.index[1], "bucket": "unknown"},
+            ]
+        )
 
         result = compute_signal_accuracy(recs, price)
 

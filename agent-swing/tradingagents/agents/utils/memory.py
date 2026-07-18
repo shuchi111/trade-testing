@@ -38,11 +38,13 @@ class FinancialSituationMemory:
         scores = self.bm25.get_scores(query_tokens)
         top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:n_matches]
 
-        results = []
-        max_score = max(scores) if max(scores) > 0 else 1
+        # BM25 can return negative scores; clamp before normalizing to [0, 1].
+        nonneg = [max(0.0, float(s)) for s in scores]
+        max_score = max(nonneg) if nonneg else 0.0
 
+        results = []
         for idx in top_indices:
-            normalized_score = scores[idx] / max_score if max_score > 0 else 0
+            normalized_score = (nonneg[idx] / max_score) if max_score > 0 else 0.0
             results.append({
                 "matched_situation": self.documents[idx],
                 "recommendation": self.recommendations[idx],

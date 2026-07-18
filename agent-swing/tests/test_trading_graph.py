@@ -7,6 +7,7 @@ All LLM calls are replaced with deterministic mocks so these tests:
   - Verify graph wiring, state propagation, and signal extraction
   - Cover edge cases: malformed LLM output, empty memory, tool failures
 """
+
 from __future__ import annotations
 
 import json
@@ -44,6 +45,7 @@ from tradingagents.dataflows.stockstats_utils import _cache_date_range
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _llm_response(text: str) -> MagicMock:
     """Build a mock LLM response object with .content = text."""
     r = MagicMock()
@@ -75,19 +77,30 @@ def _base_state() -> dict[str, Any]:
         "fundamentals_report": "Strong earnings growth.",
         "investment_plan": "Consider buying on dips.",
         "trader_investment_plan": "BUY with 2% stop-loss.",
-        "investment_debate_state": InvestDebateState({
-            "bull_history": "", "bear_history": "", "history": "",
-            "current_response": "", "judge_decision": "", "count": 0,
-        }),
-        "risk_debate_state": RiskDebateState({
-            "aggressive_history": "", "conservative_history": "",
-            "neutral_history": "", "history": "",
-            "latest_speaker": "",
-            "current_aggressive_response": "",
-            "current_conservative_response": "",
-            "current_neutral_response": "",
-            "judge_decision": "", "count": 0,
-        }),
+        "investment_debate_state": InvestDebateState(
+            {
+                "bull_history": "",
+                "bear_history": "",
+                "history": "",
+                "current_response": "",
+                "judge_decision": "",
+                "count": 0,
+            }
+        ),
+        "risk_debate_state": RiskDebateState(
+            {
+                "aggressive_history": "",
+                "conservative_history": "",
+                "neutral_history": "",
+                "history": "",
+                "latest_speaker": "",
+                "current_aggressive_response": "",
+                "current_conservative_response": "",
+                "current_neutral_response": "",
+                "judge_decision": "",
+                "count": 0,
+            }
+        ),
         "final_trade_decision": "",
     }
 
@@ -95,6 +108,7 @@ def _base_state() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Unit tests — individual agent nodes
 # ---------------------------------------------------------------------------
+
 
 class TestBullResearcher:
     def test_appends_bull_argument_to_history(self):
@@ -204,6 +218,7 @@ class TestPortfolioManager:
 # Unit tests — signal processing
 # ---------------------------------------------------------------------------
 
+
 class TestSignalProcessor:
     def test_extracts_buy_signal(self):
         llm = make_mock_llm(["BUY"])
@@ -242,6 +257,7 @@ class TestSignalProcessor:
 # Unit tests — memory system
 # ---------------------------------------------------------------------------
 
+
 class TestFinancialSituationMemory:
     def test_returns_empty_list_when_no_memories(self):
         mem = FinancialSituationMemory("test", {})
@@ -249,10 +265,12 @@ class TestFinancialSituationMemory:
 
     def test_retrieves_most_relevant_memory(self):
         mem = FinancialSituationMemory("test", {})
-        mem.add_situations([
-            ("TCS.NS strong earnings beat", "BUY"),
-            ("TSLA delivery miss bearish", "SELL"),
-        ])
+        mem.add_situations(
+            [
+                ("TCS.NS strong earnings beat", "BUY"),
+                ("TSLA delivery miss bearish", "SELL"),
+            ]
+        )
         results = mem.get_memories("TCS.NS earnings beat expectations", n_matches=1)
         assert len(results) == 1
         assert results[0]["recommendation"] == "BUY"
@@ -281,13 +299,22 @@ class TestFinancialSituationMemory:
 # Unit tests — propagator (state initialisation)
 # ---------------------------------------------------------------------------
 
+
 class TestPropagator:
     def test_initial_state_has_required_keys(self):
         prop = Propagator()
         state = prop.create_initial_state("TCS.NS", "2024-06-01")
-        for key in ["company_of_interest", "trade_date", "investment_debate_state",
-                    "risk_debate_state", "market_report", "fundamentals_report",
-                    "sentiment_report", "news_report", "messages"]:
+        for key in [
+            "company_of_interest",
+            "trade_date",
+            "investment_debate_state",
+            "risk_debate_state",
+            "market_report",
+            "fundamentals_report",
+            "sentiment_report",
+            "news_report",
+            "messages",
+        ]:
             assert key in state
 
     def test_debate_states_start_at_count_zero(self):
@@ -305,6 +332,7 @@ class TestPropagator:
 # ---------------------------------------------------------------------------
 # Integration test — full graph end-to-end with mocked LLMs and tools
 # ---------------------------------------------------------------------------
+
 
 class TestTradingGraphEndToEnd:
     """
@@ -383,6 +411,7 @@ class TestTradingGraphEndToEnd:
 # ---------------------------------------------------------------------------
 # Unit tests — Yahoo Finance cache helper
 # ---------------------------------------------------------------------------
+
 
 class TestCacheDateRange:
     def test_returns_two_strings(self):

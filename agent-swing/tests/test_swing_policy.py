@@ -3,6 +3,7 @@ Unit tests for swing trading policy strings and prompt wiring.
 
 No LLM or network — verifies constants and that key agent nodes reference them.
 """
+
 from __future__ import annotations
 
 import sys
@@ -79,7 +80,8 @@ class TestProviderKwargsGoogle:
         kwargs = g._get_provider_kwargs()
         assert kwargs["timeout"] == 300.0
         assert kwargs["max_retries"] == 5
-#testing
+
+    # testing
     def test_env_overrides_apply_to_google(self, monkeypatch):
         monkeypatch.setenv("LLM_HTTP_TIMEOUT", "120")
         monkeypatch.setenv("LLM_HTTP_MAX_RETRIES", "2")
