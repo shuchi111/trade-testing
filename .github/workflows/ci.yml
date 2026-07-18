@@ -1,0 +1,132 @@
+# CI aligned with swing-trading-dev / tradermonty/claude-trading-skills:
+# ruff lint/format, codespell, bandit, detect-secrets, pytest.
+# No frontend job (this repo is Python cron agents only).
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-lint:
+    name: Python lint (ruff + codespell)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Pin ruff to match pyproject optional-deps / skills-pack CI (v0.9.6)
+      - name: Install linters
+        run: pip install "ruff==0.9.6" codespell
+
+      - name: Ruff check
+        run: ruff check agent/ agent-swing/
+
+      - name: Ruff format check
+        run: ruff format --check tests/ agent-swing/tests/
+
+      # Use pyproject.toml config for skip/ignore-words-list
+      - name: Codespell
+        run: codespell --toml pyproject.toml agent/ agent-swing/ scripts/ tests/
+
+  python-test-agent:
+    name: Python tests (agent)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: agent/requirements.txt
+
+      - name: Install agent + test deps
+        run: |
+          pip install -r agent/requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Pytest (repo tests/ against agent/)
+        env:
+          PYTHONPATH: agent
+        run: pytest tests/ -q --tb=short
+
+  python-test-agent-swing:
+    name: Python tests (agent-swing)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: agent-swing/requirements.txt
+
+      - name: Install agent-swing + test deps
+        run: |
+          pip install -r agent-swing/requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Pytest
+        working-directory: agent-swing
+        run: pytest tests/ -q --tb=short
+
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install security tools
+        run: pip install "bandit[toml]>=1.9.0" "detect-secrets>=1.5.0"
+
+      - name: Bandit SAST scan (agent)
+        run: >
+          bandit -c pyproject.toml -r agent/
+          --exclude '*/tests/*,*/data_cache/*,*/eval_results/*,*/results/*,*/reports/*'
+
+      - name: Bandit SAST scan (agent-swing)
+        run: >
+          bandit -c pyproject.toml -r agent-swing/
+          --exclude '*/tests/*,*/data_cache/*,*/eval_results/*,*/results/*,*/reports/*,*/.cache/*'
+
+      # Compare a fresh scan against committed baseline (results only, ignore metadata)
+      - name: Detect secrets check
+        run: |
+          detect-secrets scan \
+            --exclude-files '\.env$|\.json$|\.csv$|\.md$|\.zip$|\.baseline$|package-lock\.json$|node_modules/|\.next/|data_cache/|eval_results/|/results/' \
+            > /tmp/new_scan.json
+          python3 -c "
+          import json, sys
+          with open('.secrets.baseline') as f: old = json.load(f)
+          with open('/tmp/new_scan.json') as f: new = json.load(f)
+          old_set = {(p, i['hashed_secret'], i['line_number'])
+                     for p, items in old.get('results', {}).items() for i in items}
+          new_set = {(p, i['hashed_secret'], i['line_number'])
+                     for p, items in new.get('results', {}).items() for i in items}
+          diff = new_set - old_set
+          if diff:
+              print(f'ERROR: {len(diff)} new secret(s) not in baseline:')
+              for p, h, ln in sorted(diff):
+                  print(f'  {p}:{ln}')
+              sys.exit(1)
+          print(f'OK: {len(new_set)} known, 0 new')
+          "
