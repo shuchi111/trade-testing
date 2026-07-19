@@ -252,14 +252,17 @@ def decide_and_execute(
         )
         return {"ok": True, "ticker": ticker, "action_taken": "SKIP", "skip_reason": "no_price"}
 
-    # Stale: signal as_of older than trade_date by >1 day
+    # Stale: signal bar date vs execute trade_date.
+    # Allow weekend/holiday + Yahoo lag (default 4 calendar days). Override: ML_SIGNAL_MAX_STALE_DAYS.
     if sig.get("as_of") and str(sig["as_of"]) < trade_date:
+        import os
         from datetime import date as date_cls
 
         try:
             d0 = date_cls.fromisoformat(str(sig["as_of"])[:10])
             d1 = date_cls.fromisoformat(trade_date[:10])
-            if (d1 - d0).days > 1:
+            max_stale = int(os.getenv("ML_SIGNAL_MAX_STALE_DAYS", "4"))
+            if (d1 - d0).days > max_stale:
                 log_execution(
                     conn,
                     ticker=ticker,

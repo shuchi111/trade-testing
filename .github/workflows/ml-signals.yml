@@ -65,10 +65,18 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           set -uo pipefail
-          if [ -z "$TRADE_DATE_INPUT" ]; then
-            DATE="$(date -u +'%Y-%m-%d')"
-          else
+          if [ -n "$TRADE_DATE_INPUT" ]; then
             DATE="$TRADE_DATE_INPUT"
+          else
+            # Prefer last weekday so weekend/manual runs don't mark signals stale
+            DATE="$(python - <<'PY'
+from datetime import date, timedelta
+d = date.today()
+while d.weekday() >= 5:  # Sat/Sun → walk back to Friday
+    d -= timedelta(days=1)
+print(d.isoformat())
+PY
+)"
           fi
           echo "Swing DB | ML score | trade_date=$DATE"
           cd agent-swing

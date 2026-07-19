@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from supabase import create_client
 
 from .config import (
     BACKTEST_END,
@@ -21,15 +22,65 @@ logger = logging.getLogger(__name__)
 _CHUNK = 400
 _PAGE = 1000
 
+_AGENT = Path(__file__).resolve().parents[1]
+if str(_AGENT) not in sys.path:
+    sys.path.insert(0, str(_AGENT))
+
+
+def _has_supabase() -> bool:
+    return bool(SUPABASE_URL and SUPABASE_KEY)
+
 
 def _sb():
-    if not SUPABASE_URL or not SUPABASE_KEY:
+    if not _has_supabase():
         raise RuntimeError("NEXT_PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY required")
+    from supabase import create_client
+
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
+def _pg_conn():
+    """Cron path: use DATABASE_URL / DIRECT_URL (no Supabase REST keys needed)."""
+    from db_url import resolve_psycopg2_url
+    import psycopg2  # type: ignore[reportMissingModuleSource]
+
+    url = resolve_psycopg2_url()
+    if not url:
+        raise RuntimeError("DIRECT_URL / DATABASE_URL required")
+    return psycopg2.connect(url)
+
+
+def _backend() -> str:
+    if _has_supabase():
+        return "supabase"
+    try:
+        from db_url import resolve_psycopg2_url
+
+        if resolve_psycopg2_url():
+            return "psycopg2"
+    except Exception:
+        pass
+    raise RuntimeError(
+        "Set NEXT_PUBLIC_SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY, or DATABASE_URL / DIRECT_URL"
+    )
+
+
 def download_yf_ohlcv(ticker: str, start: str, end: str) -> pd.DataFrame:
-    """Download daily OHLCV via yfinance (preferred for 15y history)."""
+    """Download daily OHLCV via yfinance (preferred for 15y history).
+
+    Parameters
+    ----------
+    ticker : str
+        Yahoo-compatible symbol (e.g. ``TCS.NS``, ``BTC-USD``).
+    start, end : str
+        Inclusive ISO dates (``YYYY-MM-DD``).
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns Open/High/Low/Close/Volume indexed by naive timestamps.
+        Empty DataFrame on download failure.
+    """
     try:
         import yfinance as yf  # type: ignore[reportMissingImports]
     except ImportError:
@@ -59,11 +110,26 @@ def download_yf_ohlcv(ticker: str, start: str, end: str) -> pd.DataFrame:
 
 
 def upsert_ohlcv(ticker: str, ohlcv: pd.DataFrame, *, source: str = "yfinance") -> int:
-    """Upsert OHLCV rows into market_daily_bars. Returns rows attempted."""
+    """Upsert OHLCV rows into ``market_daily_bars``.
+
+    Parameters
+    ----------
+    ticker : str
+        Instrument symbol (stored uppercased).
+    ohlcv : pd.DataFrame
+        Must include Close; Open/High/Low/Volume optional.
+    source : str
+        Provenance label written on each row (default ``yfinance``).
+
+    Returns
+    -------
+    int
+        Number of rows successfully upserted (chunk successes only).
+    """
     if ohlcv is None or ohlcv.empty:
         return 0
-    sb = _sb()
     ticker_u = ticker.strip().upper()
+    synced_at = datetime.now(timezone.utc)
     rows: list[dict[str, Any]] = []
     for ts, row in ohlcv.iterrows():
         try:
@@ -78,15 +144,71 @@ def upsert_ohlcv(ticker: str, ohlcv: pd.DataFrame, *, source: str = "yfinance") 
                     "close": float(row["Close"]),
                     "volume": float(row["Volume"]) if pd.notna(row.get("Volume")) else None,
                     "source": source,
-                    "synced_at": datetime.utcnow().isoformat() + "Z",
+                    "synced_at": synced_at,
                 }
             )
         except Exception:
             continue
 
+    if not rows:
+        return 0
+
+    backend = _backend()
+    if backend == "psycopg2":
+        written = 0
+        conn = _pg_conn()
+        try:
+            with conn.cursor() as cur:
+                for i in range(0, len(rows), _CHUNK):
+                    chunk = rows[i : i + _CHUNK]
+                    args = [
+                        (
+                            r["ticker"],
+                            r["trade_date"],
+                            r["open"],
+                            r["high"],
+                            r["low"],
+                            r["close"],
+                            r["volume"],
+                            r["source"],
+                            r["synced_at"],
+                        )
+                        for r in chunk
+                    ]
+                    cur.executemany(
+                        """
+                        INSERT INTO market_daily_bars
+                          (ticker, trade_date, open, high, low, close, volume, source, synced_at)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (ticker, trade_date) DO UPDATE SET
+                          open = EXCLUDED.open,
+                          high = EXCLUDED.high,
+                          low = EXCLUDED.low,
+                          close = EXCLUDED.close,
+                          volume = EXCLUDED.volume,
+                          source = EXCLUDED.source,
+                          synced_at = EXCLUDED.synced_at
+                        """,
+                        args,
+                    )
+                    written += len(chunk)
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            logger.warning("psycopg2 upsert failed for %s: %s", ticker_u, exc)
+            return 0
+        finally:
+            conn.close()
+        return written
+
+    sb = _sb()
     written = 0
-    for i in range(0, len(rows), _CHUNK):
-        chunk = rows[i : i + _CHUNK]
+    payload = [
+        {**r, "synced_at": r["synced_at"].isoformat().replace("+00:00", "Z")}
+        for r in rows
+    ]
+    for i in range(0, len(payload), _CHUNK):
+        chunk = payload[i : i + _CHUNK]
         try:
             sb.table("market_daily_bars").upsert(chunk, on_conflict="ticker,trade_date").execute()
             written += len(chunk)
@@ -98,33 +220,79 @@ def upsert_ohlcv(ticker: str, ohlcv: pd.DataFrame, *, source: str = "yfinance") 
 
 
 def load_ohlcv_from_db(ticker: str, start: str, end: str) -> pd.DataFrame:
-    """Load daily bars from market_daily_bars for [start, end] (paginated)."""
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        return pd.DataFrame()
-    sb = _sb()
+    """Load daily bars from ``market_daily_bars`` for ``[start, end]``.
+
+    Parameters
+    ----------
+    ticker, start, end : str
+        Symbol and inclusive ISO date bounds.
+
+    Returns
+    -------
+    pd.DataFrame
+        OHLCV with DatetimeIndex; empty if missing credentials or no rows.
+        Paginated in ``_PAGE``-sized reads for large histories.
+    """
     ticker_u = ticker.strip().upper()
-    all_rows: list[dict[str, Any]] = []
-    offset = 0
     try:
-        while True:
-            resp = (
-                sb.table("market_daily_bars")
-                .select("trade_date,open,high,low,close,volume")
-                .eq("ticker", ticker_u)
-                .gte("trade_date", start)
-                .lte("trade_date", end)
-                .order("trade_date", desc=False)
-                .range(offset, offset + _PAGE - 1)
-                .execute()
-            )
-            batch = resp.data or []
-            all_rows.extend(batch)
-            if len(batch) < _PAGE:
-                break
-            offset += _PAGE
-    except Exception as exc:
-        logger.warning("market_daily_bars read failed for %s: %s", ticker_u, exc)
+        backend = _backend()
+    except RuntimeError:
         return pd.DataFrame()
+
+    all_rows: list[dict[str, Any]] = []
+    if backend == "psycopg2":
+        try:
+            conn = _pg_conn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT trade_date, open, high, low, close, volume
+                        FROM market_daily_bars
+                        WHERE ticker = %s AND trade_date >= %s AND trade_date <= %s
+                        ORDER BY trade_date ASC
+                        """,
+                        (ticker_u, start, end),
+                    )
+                    for row in cur.fetchall():
+                        all_rows.append(
+                            {
+                                "trade_date": row[0],
+                                "open": row[1],
+                                "high": row[2],
+                                "low": row[3],
+                                "close": row[4],
+                                "volume": row[5],
+                            }
+                        )
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning("market_daily_bars read failed for %s: %s", ticker_u, exc)
+            return pd.DataFrame()
+    else:
+        sb = _sb()
+        offset = 0
+        try:
+            while True:
+                resp = (
+                    sb.table("market_daily_bars")
+                    .select("trade_date,open,high,low,close,volume")
+                    .eq("ticker", ticker_u)
+                    .gte("trade_date", start)
+                    .lte("trade_date", end)
+                    .order("trade_date", desc=False)
+                    .range(offset, offset + _PAGE - 1)
+                    .execute()
+                )
+                batch = resp.data or []
+                all_rows.extend(batch)
+                if len(batch) < _PAGE:
+                    break
+                offset += _PAGE
+        except Exception as exc:
+            logger.warning("market_daily_bars read failed for %s: %s", ticker_u, exc)
+            return pd.DataFrame()
 
     if not all_rows:
         return pd.DataFrame()
@@ -148,7 +316,19 @@ def load_ohlcv_from_db(ticker: str, start: str, end: str) -> pd.DataFrame:
 
 
 def coverage_summary(ticker: str) -> dict[str, Any]:
-    """Return min/max date + bar count for UI (no full-table scan of OHLCV)."""
+    """Return min/max date + bar count for UI (no full OHLCV scan).
+
+    Parameters
+    ----------
+    ticker : str
+        Instrument symbol.
+
+    Returns
+    -------
+    dict
+        Keys: ``ticker``, ``bars``, ``date_from``, ``date_to``, ``years``, ``source``.
+        Zeroed defaults when the cache is empty or unreachable.
+    """
     empty = {
         "ticker": ticker.strip().upper(),
         "bars": 0,
@@ -157,10 +337,46 @@ def coverage_summary(ticker: str) -> dict[str, Any]:
         "years": 0.0,
         "source": None,
     }
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        return empty
-    sb = _sb()
     ticker_u = ticker.strip().upper()
+    try:
+        backend = _backend()
+    except RuntimeError:
+        return empty
+
+    if backend == "psycopg2":
+        try:
+            conn = _pg_conn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT COUNT(*), MIN(trade_date), MAX(trade_date),
+                               (ARRAY_AGG(source ORDER BY trade_date DESC))[1]
+                        FROM market_daily_bars WHERE ticker = %s
+                        """,
+                        (ticker_u,),
+                    )
+                    row = cur.fetchone()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning("coverage_summary failed for %s: %s", ticker_u, exc)
+            return empty
+        bars = int(row[0] or 0) if row else 0
+        if bars == 0:
+            return empty
+        d0, d1 = row[1], row[2]
+        years = round((d1 - d0).days / 365.25, 2) if d0 and d1 else 0.0
+        return {
+            "ticker": ticker_u,
+            "bars": bars,
+            "date_from": d0.isoformat() if d0 else None,
+            "date_to": d1.isoformat() if d1 else None,
+            "years": years,
+            "source": row[3],
+        }
+
+    sb = _sb()
     try:
         count_resp = (
             sb.table("market_daily_bars")
@@ -237,9 +453,21 @@ def ensure_history(
     end: str = BACKTEST_END,
     min_bars: int = 200,
 ) -> pd.DataFrame:
-    """
-    Prefer DB cache; if thin/missing, sync from Yahoo then reload.
-    Returns OHLCV DataFrame indexed by date.
+    """Prefer DB cache; sync from Yahoo when thin/missing, then reload.
+
+    Parameters
+    ----------
+    ticker : str
+        Instrument symbol.
+    start, end : str
+        Requested history window (ISO dates).
+    min_bars : int
+        Minimum cached rows before treating coverage as sufficient.
+
+    Returns
+    -------
+    pd.DataFrame
+        OHLCV indexed by date (from DB after sync, or live Yahoo as last resort).
     """
     cached = load_ohlcv_from_db(ticker, start, end)
     need_sync = cached.empty or len(cached) < min_bars
