@@ -19,7 +19,10 @@ import json
 import logging
 from urllib.request import Request, urlopen
 
-from .symbol_utils import crypto_base
+import os
+
+from .fetch_cache import cached_fetch
+from .symbol_utils import crypto_base, indian_equity_base
 
 logger = logging.getLogger(__name__)
 
@@ -38,14 +41,23 @@ def _stocktwits_symbol(ticker: str) -> str:
     return f"{base}.X" if base else ticker.strip().upper()
 
 
-def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.0) -> str:
-    """Fetch recent StockTwits messages for ``ticker`` and return them as a
-    formatted plaintext block ready for prompt injection.
+def _unsupported_indian_message(ticker: str) -> str:
+    base = indian_equity_base(ticker) or ticker.strip().upper()
+    return (
+        f"<StockTwits has no cashtag stream for Indian exchange tickers "
+        f"({ticker.upper()}). StockTwits primarily covers US-listed symbols; "
+        f"retail sentiment for {base} is sourced from Reddit and Yahoo news instead.>"
+    )
 
-    Returns a placeholder string when the endpoint is unreachable, the
-    symbol has no messages, or the response shape is unexpected — the
-    caller never has to special-case None or exceptions.
-    """
+
+def _fetch_stocktwits_messages_uncached(
+    ticker: str,
+    limit: int = 30,
+    timeout: float = 10.0,
+) -> str:
+    if indian_equity_base(ticker):
+        return _unsupported_indian_message(ticker)
+
     url = _API.format(ticker=_stocktwits_symbol(ticker))
     req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
     try:
@@ -94,3 +106,18 @@ def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.
         f"Total: {total} most-recent messages"
     )
     return summary + "\n\n" + "\n".join(lines)
+
+
+def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.0) -> str:
+    """Fetch recent StockTwits messages for ``ticker`` and return them as a
+    formatted plaintext block ready for prompt injection.
+
+    Returns a placeholder string when the endpoint is unreachable, the
+    symbol has no messages, or the response shape is unexpected — the
+    caller never has to special-case None or exceptions.
+    """
+    return cached_fetch(
+        ("stocktwits", ticker.strip().upper(), limit),
+        lambda: _fetch_stocktwits_messages_uncached(ticker, limit=limit, timeout=timeout),
+        ttl_sec=float(os.getenv("SOCIAL_FETCH_CACHE_TTL_SEC", "300")),
+    )
