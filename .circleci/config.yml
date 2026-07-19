@@ -149,6 +149,19 @@ jobs:
                 ;;
             esac
       - run:
+          name: Learn from closed trades (persist lessons)
+          no_output_timeout: 15m
+          command: |
+            set -euo pipefail
+            case "${PIPELINE_MODE}" in
+              batch|both)
+                bash scripts/run-reflect.sh || echo "WARN: reflection harvest failed (non-fatal)"
+                ;;
+              *)
+                echo "Skipping reflection (mode=${PIPELINE_MODE})"
+                ;;
+            esac
+      - run:
           name: Run price refresh (stale cache)
           no_output_timeout: 60m
           command: |

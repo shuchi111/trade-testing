@@ -52,9 +52,7 @@ class InstrumentPolicyTests(unittest.TestCase):
         with mock.patch.object(
             instrument_policy, "_fetch_usd_inr_rate", side_effect=[80.0, 81.0]
         ) as fetch:
-            with mock.patch.object(
-                instrument_policy, "usd_inr_cache_ttl_sec", return_value=60.0
-            ):
+            with mock.patch.object(instrument_policy, "usd_inr_cache_ttl_sec", return_value=60.0):
                 first = instrument_policy.usd_inr_rate()
                 second = instrument_policy.usd_inr_rate()
                 instrument_policy._usd_inr_cache = (80.0, 0.0)

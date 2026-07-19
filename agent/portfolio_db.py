@@ -5,34 +5,18 @@ import logging
 from datetime import date, datetime
 from typing import Any
 
-from trading_constraints import (
-    buy_transaction_charge_inr,
-    max_position_inr,
-    min_wallet_cash_reserve_inr,
-    sell_transaction_charge_inr,
-    trailing_stop_loss_pct,
-    swing_exit_window_days,
-    transaction_charge_for_action,
-)
-
-ADMIN_WALLET_ID = "00000000-0000-0000-0000-000000000001"
-# Fractional-share float noise: treat remainder at or below this as a full exit.
-QUANTITY_EPSILON = 1e-6
 logger = logging.getLogger(__name__)
 
-
-def _rollback_after_optional_query_error(conn, label: str, exc: Exception) -> None:
-    """Clear psycopg2's aborted transaction state after a fallback query fails."""
-    try:
-        conn.rollback()
-    except Exception as rollback_err:
-        logger.warning("%s failed: %s; rollback failed: %s", label, exc, rollback_err)
-        return
-    logger.warning("%s failed: %s", label, exc)
+ADMIN_WALLET_ID = "00000000-0000-0000-0000-000000000001"
+ML_WALLET_ID = "00000000-0000-0000-0000-000000000003"
+MAX_POSITION_INR = 25_000.0
+MIN_WALLET_CASH_RESERVE_INR = 5_000.0
+SWING_EXIT_WINDOW_DAYS = 90
+TRAILING_STOP_LOSS_PCT = 5.0
 
 
-def load_holding(conn, ticker: str) -> tuple[float, float]:
-    """Return (quantity, avg_entry) for ticker in admin wallet."""
+def load_holding(conn, ticker: str, wallet_id: str = ADMIN_WALLET_ID) -> tuple[float, float]:
+    """Return (quantity, avg_entry) for ticker in the given wallet."""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -40,7 +24,7 @@ def load_holding(conn, ticker: str) -> tuple[float, float]:
             FROM portfolio_holdings
             WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s)
             """,
-            (ADMIN_WALLET_ID, ticker),
+            (wallet_id, ticker),
         )
         row = cur.fetchone()
     if not row:
@@ -49,7 +33,6 @@ def load_holding(conn, ticker: str) -> tuple[float, float]:
 
 
 def load_holding_detail(conn, ticker: str) -> dict[str, Any]:
-    """Return holding row including entry_time when present."""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -75,7 +58,6 @@ def load_holding_detail(conn, ticker: str) -> dict[str, Any]:
 
 
 def load_all_holding_details(conn) -> list[dict[str, Any]]:
-    """Return all open holdings with entry dates for portfolio-wide context."""
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -88,10 +70,8 @@ def load_all_holding_details(conn) -> list[dict[str, Any]]:
                 (ADMIN_WALLET_ID,),
             )
             rows = cur.fetchall()
-    except Exception as exc:
-        _rollback_after_optional_query_error(conn, "load_all_holding_details", exc)
+    except Exception:
         return []
-
     out: list[dict[str, Any]] = []
     for ticker, qty, avg_entry, entry_time in rows:
         if isinstance(entry_time, datetime):
@@ -108,8 +88,17 @@ def load_all_holding_details(conn) -> list[dict[str, Any]]:
     return out
 
 
+def load_wallet_cash(conn, wallet_id: str = ADMIN_WALLET_ID) -> float:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT current_cash FROM wallet_accounts WHERE id = %s",
+            (wallet_id,),
+        )
+        row = cur.fetchone()
+    return float(row[0]) if row else 0.0
+
+
 def load_latest_reference_prices(conn, tickers: list[str]) -> dict[str, float]:
-    """Latest cached reference price per ticker, used only for context estimates."""
     if not tickers:
         return {}
     try:
@@ -124,24 +113,13 @@ def load_latest_reference_prices(conn, tickers: list[str]) -> dict[str, float]:
                 ([t.upper() for t in tickers],),
             )
             rows = cur.fetchall()
-    except Exception as exc:
-        _rollback_after_optional_query_error(conn, "load_latest_reference_prices", exc)
+    except Exception:
         return {}
     return {
         str(ticker).upper(): float(price)
         for ticker, price in rows
         if price is not None and float(price) > 0
     }
-
-
-def load_wallet_cash(conn) -> float:
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT current_cash FROM wallet_accounts WHERE id = %s",
-            (ADMIN_WALLET_ID,),
-        )
-        row = cur.fetchone()
-    return float(row[0]) if row else 0.0
 
 
 def count_open_positions(conn) -> int:
@@ -170,38 +148,14 @@ def portfolio_value(conn, prices: dict[str, float]) -> float:
     return cash + holdings_val
 
 
-def load_recent_portfolio_trades(conn, ticker: str, limit: int = 5) -> list[dict[str, Any]]:
-    """Recent live paper trades for one ticker."""
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT action, trade_time, quantity, price, total_value, realized_pnl
-                FROM portfolio_trades
-                WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s)
-                ORDER BY trade_time DESC
-                LIMIT %s
-                """,
-                (ADMIN_WALLET_ID, ticker, limit),
-            )
-            rows = cur.fetchall()
-    except Exception as exc:
-        _rollback_after_optional_query_error(conn, "load_recent_portfolio_trades", exc)
-        return []
-    out = []
-    for action, trade_time, qty, price, total_value, pnl in rows:
-        ts = trade_time.date() if isinstance(trade_time, datetime) else trade_time
-        out.append(
-            {
-                "action": action,
-                "trade_time": ts,
-                "quantity": float(qty or 0),
-                "price": float(price or 0),
-                "total_value": float(total_value or 0),
-                "realized_pnl": None if pnl is None else float(pnl),
-            }
-        )
-    return out
+def days_held_for_entry(entry_time: Any, as_of: date) -> int | None:
+    if not entry_time:
+        return None
+    if isinstance(entry_time, datetime):
+        entry_time = entry_time.date()
+    if not isinstance(entry_time, date):
+        return None
+    return max(0, (as_of - entry_time).days)
 
 
 def current_open_position_since(conn, ticker: str) -> date | None:
@@ -218,8 +172,7 @@ def current_open_position_since(conn, ticker: str) -> date | None:
                 (ADMIN_WALLET_ID, ticker),
             )
             rows = cur.fetchall()
-    except Exception as exc:
-        _rollback_after_optional_query_error(conn, "current_open_position_since", exc)
+    except Exception:
         return None
 
     running_qty = 0.0
@@ -234,228 +187,7 @@ def current_open_position_since(conn, ticker: str) -> date | None:
     return since
 
 
-def load_recent_wallet_trades(conn, limit: int = 10) -> list[dict[str, Any]]:
-    """Recent live paper trades across the whole wallet."""
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT ticker, action, trade_time, quantity, price, total_value, realized_pnl
-                FROM portfolio_trades
-                WHERE wallet_id = %s
-                ORDER BY trade_time DESC
-                LIMIT %s
-                """,
-                (ADMIN_WALLET_ID, limit),
-            )
-            rows = cur.fetchall()
-    except Exception as exc:
-        _rollback_after_optional_query_error(conn, "load_recent_wallet_trades", exc)
-        return []
-    out = []
-    for ticker, action, trade_time, qty, price, total_value, pnl in rows:
-        ts = trade_time.date() if isinstance(trade_time, datetime) else trade_time
-        out.append(
-            {
-                "ticker": str(ticker).upper(),
-                "action": action,
-                "trade_time": ts,
-                "quantity": float(qty or 0),
-                "price": float(price or 0),
-                "total_value": float(total_value or 0),
-                "realized_pnl": None if pnl is None else float(pnl),
-            }
-        )
-    return out
-
-
-def load_recent_wallet_transactions(conn, limit: int = 12) -> list[dict[str, Any]]:
-    """Recent wallet ledger rows shown in Wallet/Activity views."""
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT type, amount, balance_after, note, created_at
-                FROM wallet_transactions
-                WHERE wallet_id = %s
-                ORDER BY created_at DESC
-                LIMIT %s
-                """,
-                (ADMIN_WALLET_ID, limit),
-            )
-            rows = cur.fetchall()
-    except Exception as exc:
-        _rollback_after_optional_query_error(conn, "load_recent_wallet_transactions", exc)
-        return []
-    out = []
-    for tx_type, amount, balance_after, note, created_at in rows:
-        ts = created_at.date() if isinstance(created_at, datetime) else created_at
-        out.append(
-            {
-                "type": str(tx_type or ""),
-                "amount": float(amount or 0),
-                "balance_after": float(balance_after or 0),
-                "note": str(note or ""),
-                "created_at": ts,
-            }
-        )
-    return out
-
-
-def load_recent_ai_trade_executions(
-    conn, ticker: str | None = None, limit: int = 12
-) -> list[dict[str, Any]]:
-    """Recent autonomous execution decisions, including skips, buys, and sells."""
-    try:
-        with conn.cursor() as cur:
-            if ticker:
-                cur.execute(
-                    """
-                    SELECT ticker, trade_date, decision, action_taken, quantity, price, pnl,
-                           skip_reason, dry_run, created_at
-                    FROM ai_trade_executions
-                    WHERE UPPER(ticker) = UPPER(%s)
-                    ORDER BY created_at DESC
-                    LIMIT %s
-                    """,
-                    (ticker, limit),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT ticker, trade_date, decision, action_taken, quantity, price, pnl,
-                           skip_reason, dry_run, created_at
-                    FROM ai_trade_executions
-                    ORDER BY created_at DESC
-                    LIMIT %s
-                    """,
-                    (limit,),
-                )
-            rows = cur.fetchall()
-    except Exception as exc:
-        _rollback_after_optional_query_error(conn, "load_recent_ai_trade_executions", exc)
-        return []
-    return [
-        {
-            "ticker": str(r[0]).upper(),
-            "trade_date": r[1],
-            "decision": r[2] or "",
-            "action_taken": r[3] or "",
-            "quantity": None if r[4] is None else float(r[4]),
-            "price": None if r[5] is None else float(r[5]),
-            "pnl": None if r[6] is None else float(r[6]),
-            "skip_reason": r[7] or "",
-            "dry_run": bool(r[8]),
-            "created_at": r[9],
-        }
-        for r in rows
-    ]
-
-
-def load_portfolio_trade_quality(conn) -> dict[str, Any]:
-    """Dashboard-style realised trade-quality metrics from the live trade ledger."""
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                  COUNT(*) FILTER (WHERE action = 'BUY') AS buy_trades,
-                  COUNT(*) FILTER (WHERE action = 'SELL') AS sell_trades,
-                  COUNT(*) FILTER (WHERE action = 'SELL' AND realized_pnl > 0) AS winning_trades,
-                  COUNT(*) FILTER (WHERE action = 'SELL' AND realized_pnl < 0) AS losing_trades,
-                  COALESCE(SUM(realized_pnl) FILTER (WHERE action = 'SELL'), 0) AS realised_pnl,
-                  COALESCE(SUM(realized_pnl) FILTER (WHERE action = 'SELL' AND realized_pnl > 0), 0) AS gross_profit,
-                  COALESCE(ABS(SUM(realized_pnl) FILTER (WHERE action = 'SELL' AND realized_pnl < 0)), 0) AS gross_loss
-                FROM portfolio_trades
-                WHERE wallet_id = %s
-                """,
-                (ADMIN_WALLET_ID,),
-            )
-            row = cur.fetchone()
-    except Exception as exc:
-        _rollback_after_optional_query_error(conn, "load_portfolio_trade_quality", exc)
-        return {}
-    if not row:
-        return {}
-    buy_trades = int(row[0] or 0)
-    sell_trades = int(row[1] or 0)
-    winning_trades = int(row[2] or 0)
-    losing_trades = int(row[3] or 0)
-    closed = winning_trades + losing_trades
-    gross_profit = float(row[5] or 0)
-    gross_loss = float(row[6] or 0)
-    avg_win = gross_profit / winning_trades if winning_trades else 0.0
-    avg_loss = gross_loss / losing_trades if losing_trades else 0.0
-    win_rate = (winning_trades / closed * 100.0) if closed else 0.0
-    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else None
-    expectancy = (win_rate / 100.0) * avg_win - (1 - win_rate / 100.0) * avg_loss if closed else 0.0
-    return {
-        "buy_trades": buy_trades,
-        "sell_trades": sell_trades,
-        "winning_trades": winning_trades,
-        "losing_trades": losing_trades,
-        "win_rate_pct": win_rate,
-        "realised_pnl": float(row[4] or 0),
-        "gross_profit": gross_profit,
-        "gross_loss": gross_loss,
-        "average_win": avg_win,
-        "average_loss": avg_loss,
-        "profit_factor": profit_factor,
-        "expectancy": expectancy,
-    }
-
-
-def last_live_buy_date(conn, ticker: str) -> date | None:
-    """Most recent filled BUY for ticker from live ledger or executions."""
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT trade_time FROM portfolio_trades
-                WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s) AND action = 'BUY'
-                ORDER BY trade_time DESC LIMIT 1
-                """,
-                (ADMIN_WALLET_ID, ticker),
-            )
-            row = cur.fetchone()
-            if row and row[0]:
-                ts = row[0]
-                return ts.date() if isinstance(ts, datetime) else ts
-    except Exception as exc:
-        _rollback_after_optional_query_error(conn, "last_live_buy_date.portfolio_trades", exc)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT trade_date FROM ai_trade_executions
-                WHERE UPPER(ticker) = UPPER(%s) AND action_taken = 'BUY' AND dry_run = false
-                ORDER BY trade_date DESC LIMIT 1
-                """,
-                (ticker,),
-            )
-            row = cur.fetchone()
-            if row and row[0]:
-                return row[0]
-    except Exception as exc:
-        _rollback_after_optional_query_error(conn, "last_live_buy_date.ai_trade_executions", exc)
-    return None
-
-
-def days_held(conn, ticker: str, as_of: date) -> int | None:
-    """Calendar days since current open holding started; purchase day is day 0."""
-    detail = load_holding_detail(conn, ticker)
-    entry = detail.get("holding_since") or detail.get("entry_time")
-    if detail["quantity"] <= 0:
-        return None
-    if not entry:
-        entry = last_live_buy_date(conn, ticker)
-    if not entry:
-        return None
-    return max(0, (as_of - entry).days)
-
-
 def load_active_trailing_stop(conn, ticker: str) -> dict[str, Any] | None:
-    """Return the active persistent trailing stop for ticker, if present."""
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -468,8 +200,7 @@ def load_active_trailing_stop(conn, ticker: str) -> dict[str, Any] | None:
                 (ADMIN_WALLET_ID, ticker),
             )
             row = cur.fetchone()
-    except Exception as exc:
-        _rollback_after_optional_query_error(conn, "load_active_trailing_stop", exc)
+    except Exception:
         return None
     if not row:
         return None
@@ -477,7 +208,7 @@ def load_active_trailing_stop(conn, ticker: str) -> dict[str, Any] | None:
         "id": str(row[0]),
         "quantity": float(row[1] or 0),
         "entry_price": float(row[2] or 0),
-        "trailing_pct": float(row[3] or trailing_stop_loss_pct()),
+        "trailing_pct": float(row[3] or TRAILING_STOP_LOSS_PCT),
         "highest_price": float(row[4] or 0),
         "current_stop_price": float(row[5] or 0),
     }
@@ -493,7 +224,7 @@ def evaluate_trailing_stop(conn, ticker: str, current_price: float) -> dict[str,
         return {"status": "BREACHED", **stop}
 
     highest = max(stop["highest_price"], current_price)
-    pct = stop["trailing_pct"] or trailing_stop_loss_pct()
+    pct = stop["trailing_pct"] or TRAILING_STOP_LOSS_PCT
     next_stop = round(highest * (1 - pct / 100.0), 4)
     if highest != stop["highest_price"] or next_stop != stop["current_stop_price"]:
         with conn.cursor() as cur:
@@ -522,6 +253,72 @@ def mark_trailing_stop_triggered(conn, stop_id: str) -> None:
         )
 
 
+def load_recent_wallet_trades(conn, limit: int = 10) -> list[dict[str, Any]]:
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ticker, action, trade_time, quantity, price, total_value, realized_pnl
+                FROM portfolio_trades
+                WHERE wallet_id = %s
+                ORDER BY trade_time DESC
+                LIMIT %s
+                """,
+                (ADMIN_WALLET_ID, limit),
+            )
+            rows = cur.fetchall()
+    except Exception:
+        return []
+    out = []
+    for ticker, action, trade_time, qty, price, total_value, pnl in rows:
+        ts = trade_time.date() if isinstance(trade_time, datetime) else trade_time
+        out.append(
+            {
+                "ticker": str(ticker).upper(),
+                "action": action,
+                "trade_time": ts,
+                "quantity": float(qty or 0),
+                "price": float(price or 0),
+                "total_value": float(total_value or 0),
+                "realized_pnl": None if pnl is None else float(pnl),
+            }
+        )
+    return out
+
+
+def load_recent_portfolio_trades(conn, ticker: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Recent live paper trades for one ticker."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT action, trade_time, quantity, price, total_value, realized_pnl
+                FROM portfolio_trades
+                WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s)
+                ORDER BY trade_time DESC
+                LIMIT %s
+                """,
+                (ADMIN_WALLET_ID, ticker, limit),
+            )
+            rows = cur.fetchall()
+    except Exception:
+        return []
+    out = []
+    for action, trade_time, qty, price, total_value, pnl in rows:
+        ts = trade_time.date() if isinstance(trade_time, datetime) else trade_time
+        out.append(
+            {
+                "action": action,
+                "trade_time": ts,
+                "quantity": float(qty or 0),
+                "price": float(price or 0),
+                "total_value": float(total_value or 0),
+                "realized_pnl": None if pnl is None else float(pnl),
+            }
+        )
+    return out
+
+
 def load_recent_ai_recommendations(conn, ticker: str, limit: int = 8) -> list[dict[str, Any]]:
     try:
         with conn.cursor() as cur:
@@ -536,8 +333,7 @@ def load_recent_ai_recommendations(conn, ticker: str, limit: int = 8) -> list[di
                 (ticker, limit),
             )
             rows = cur.fetchall()
-    except Exception as exc:
-        _rollback_after_optional_query_error(conn, "load_recent_ai_recommendations", exc)
+    except Exception:
         return []
     return [
         {
@@ -551,7 +347,6 @@ def load_recent_ai_recommendations(conn, ticker: str, limit: int = 8) -> list[di
 
 
 def load_backtest_strategy_summaries(conn, ticker: str, limit: int = 8) -> list[dict[str, Any]]:
-    """Latest backtest run per strategy for ticker (from bt_strategy_results)."""
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -566,8 +361,7 @@ def load_backtest_strategy_summaries(conn, ticker: str, limit: int = 8) -> list[
                 (ticker,),
             )
             rows = cur.fetchall()
-    except Exception as exc:
-        _rollback_after_optional_query_error(conn, "load_backtest_strategy_summaries", exc)
+    except Exception:
         return []
     out = []
     for row in rows[:limit]:
@@ -621,8 +415,7 @@ def load_backtest_trades(
                     (ticker, limit),
                 )
             rows = cur.fetchall()
-    except Exception as exc:
-        _rollback_after_optional_query_error(conn, "load_backtest_trades", exc)
+    except Exception:
         return []
     return [
         {
@@ -660,224 +453,103 @@ def build_analysis_context(
     trade_date: str,
     reference_price: float | None = None,
 ) -> str:
-    """Build portfolio and trade-history context for LLM agents.
-
-    Parameters
-    ----------
-    conn
-        Open psycopg2 connection used to read wallet, holding, trade, and
-        recommendation rows.
-    ticker
-        Exchange-qualified instrument symbol to analyze.
-    trade_date
-        Analysis date in ``YYYY-MM-DD`` format.
-    reference_price
-        Optional latest validated recommendation price for ``ticker``. When
-        omitted, current-position estimates fall back to average entry.
-
-    Returns
-    -------
-    str
-        Multi-section context string for the trading agents.
-    """
+    """Portfolio-wide context used by TradingAgents recommendations."""
     ticker = ticker.strip().upper()
     as_of = datetime.strptime(trade_date, "%Y-%m-%d").date()
-    cap = max_position_inr()
-    exit_window_days = swing_exit_window_days()
-    trailing_pct = trailing_stop_loss_pct()
-
-    detail = load_holding_detail(conn, ticker)
-    qty = detail["quantity"]
-    avg_entry = detail["avg_entry"]
     cash = load_wallet_cash(conn)
     all_holdings = load_all_holding_details(conn)
-    all_prices = load_latest_reference_prices(conn, [h["ticker"] for h in all_holdings])
+    prices = load_latest_reference_prices(conn, [h["ticker"] for h in all_holdings])
     if reference_price and reference_price > 0:
-        all_prices[ticker] = reference_price
+        prices[ticker] = reference_price
 
-    if qty <= 0:
-        current_value = 0.0
-    elif reference_price is not None:
-        current_value = qty * reference_price
-    else:
-        current_value = qty * avg_entry
-    room_to_cap = max(0.0, cap - current_value)
-    held_days = days_held(conn, ticker, as_of)
-
+    total_cost = 0.0
+    total_mark = 0.0
     lines: list[str] = [
         "=== WEBSITE CONTEXT COVERAGE ===",
         "Use every section below as if reviewing the website tabs before deciding: wallet, holdings, holding dates, live trades, backtests, prior AI history, active stops, and mandatory rules.",
         "",
         "=== LIVE PORTFOLIO ===",
     ]
-    total_cost = 0.0
-    total_mark = 0.0
     for h in all_holdings:
-        h_cost = h["quantity"] * h["avg_entry"]
-        h_mark_price = all_prices.get(h["ticker"]) or h["avg_entry"]
-        total_cost += h_cost
-        total_mark += h["quantity"] * h_mark_price
+        mark = prices.get(h["ticker"]) or h["avg_entry"]
+        total_cost += h["quantity"] * h["avg_entry"]
+        total_mark += h["quantity"] * mark
     lines.append(
         f"Wallet cash: {_fmt_inr(cash)} | Open positions: {len(all_holdings)} | "
         f"Open cost {_fmt_inr(total_cost)} | Estimated holdings value {_fmt_inr(total_mark)} | "
         f"Estimated equity {_fmt_inr(cash + total_mark)}"
     )
 
-    quality = load_portfolio_trade_quality(conn)
-    if quality:
-        pf = quality["profit_factor"]
-        pf_text = "∞" if pf is None and quality["gross_profit"] > 0 else f"{pf:.2f}" if pf is not None else "n/a"
-        lines.append(
-            "Dashboard trade quality: "
-            f"buy trades={quality['buy_trades']}, sell trades={quality['sell_trades']}, "
-            f"win rate={quality['win_rate_pct']:.1f}%, realised PnL={_fmt_inr(quality['realised_pnl'])}, "
-            f"avg win={_fmt_inr(quality['average_win'])}, avg loss={_fmt_inr(quality['average_loss'])}, "
-            f"profit factor={pf_text}, expectancy={_fmt_inr(quality['expectancy'])}"
-        )
-
     lines.append("")
     lines.append("=== ALL OPEN HOLDINGS (purchase date and days held) ===")
     if all_holdings:
         for h in all_holdings:
-            h_ticker = h["ticker"]
-            h_entry = h.get("holding_since") or h.get("entry_time")
-            h_days = None
-            if h_entry:
-                h_date = h_entry if isinstance(h_entry, date) else None
-                if h_date:
-                    h_days = max(0, (as_of - h_date).days)
-            h_mark_price = all_prices.get(h_ticker) or h["avg_entry"]
-            h_cost = h["quantity"] * h["avg_entry"]
-            h_value = h["quantity"] * h_mark_price
-            h_pnl = h_value - h_cost
-            h_room = max(0.0, cap - h_value)
-            h_stop = load_active_trailing_stop(conn, h_ticker)
-            stop_text = (
-                f", trailing stop {_fmt_inr(h_stop['current_stop_price'])}"
-                if h_stop else ""
-            )
-            entry_text = h_entry.isoformat() if hasattr(h_entry, "isoformat") else "unknown"
-            days_text = f"{h_days} days" if h_days is not None else "days unknown"
+            mark = prices.get(h["ticker"]) or h["avg_entry"]
+            value = h["quantity"] * mark
+            cost = h["quantity"] * h["avg_entry"]
+            entry = h.get("holding_since") or h.get("entry_time")
+            held_days = days_held_for_entry(entry, as_of)
+            entry_text = entry.isoformat() if hasattr(entry, "isoformat") else "unknown"
+            days_text = f"{held_days} days" if held_days is not None else "days unknown"
+            stop = load_active_trailing_stop(conn, h["ticker"])
+            stop_text = f", trailing stop {_fmt_inr(stop['current_stop_price'])}" if stop else ""
             lines.append(
-                f"{h_ticker}: qty {h['quantity']:.0f}, avg {_fmt_inr(h['avg_entry'])}, "
-                f"purchased {entry_text}, held {days_text}, mark {_fmt_inr(h_mark_price)}, "
-                f"value {_fmt_inr(h_value)}, PnL {_fmt_inr(h_pnl)}, cap room {_fmt_inr(h_room)}{stop_text}"
+                f"{h['ticker']}: qty {h['quantity']:.0f}, avg {_fmt_inr(h['avg_entry'])}, "
+                f"purchased {entry_text}, held {days_text}, mark {_fmt_inr(mark)}, "
+                f"value {_fmt_inr(value)}, PnL {_fmt_inr(value - cost)}, "
+                f"cap room {_fmt_inr(max(0.0, MAX_POSITION_INR - value))}{stop_text}"
             )
     else:
         lines.append("No open holdings in wallet.")
 
+    focus = load_holding_detail(conn, ticker)
+    focus_entry = focus.get("holding_since") or focus.get("entry_time")
+    focus_days = days_held_for_entry(focus_entry, as_of)
     lines.append("")
     lines.append("=== CURRENT TICKER FOCUS ===")
-    if qty > 0 and avg_entry > 0:
-        unrealized_pct = None
-        if reference_price and avg_entry > 0:
-            unrealized_pct = (reference_price - avg_entry) / avg_entry * 100.0
-        entry = detail.get("holding_since") or detail.get("entry_time")
-        entry_str = entry.isoformat() if hasattr(entry, "isoformat") else "unknown"
-        hold_str = f"{held_days} days held" if held_days is not None else "hold duration unknown"
+    if focus["quantity"] > 0 and focus["avg_entry"] > 0:
+        entry_text = focus_entry.isoformat() if hasattr(focus_entry, "isoformat") else "unknown"
+        mark = reference_price or focus["avg_entry"]
+        unrealized_pct = ((mark - focus["avg_entry"]) / focus["avg_entry"]) * 100
         lines.append(
-            f"Hold: {qty:.0f} {ticker} @ {_fmt_inr(avg_entry)} "
-            f"(opened {entry_str}, {hold_str}, {exit_window_days}-day swing exit window)"
+            f"Hold: {focus['quantity']:.0f} {ticker} @ {_fmt_inr(focus['avg_entry'])} "
+            f"(purchased {entry_text}, {focus_days if focus_days is not None else 'unknown'} days held, "
+            f"{SWING_EXIT_WINDOW_DAYS}-day swing exit window)"
         )
-        if unrealized_pct is not None:
-            lines.append(f"Unrealized vs entry: {_fmt_pct(unrealized_pct)} at LTP {_fmt_inr(reference_price)}")
-        active_stop = load_active_trailing_stop(conn, ticker)
-        if active_stop:
-            lines.append(
-                f"Active mandatory trailing stop: {active_stop['trailing_pct']:.0f}% trail, "
-                f"highest {_fmt_inr(active_stop['highest_price'])}, "
-                f"stop {_fmt_inr(active_stop['current_stop_price'])}"
-            )
+        lines.append(f"Unrealized vs entry: {_fmt_pct(unrealized_pct)} at LTP {_fmt_inr(mark)}")
     else:
         lines.append(f"No open position in {ticker}.")
-
-    lines.append(
-        f"Per-stock cap: {_fmt_inr(cap)} | Room to add on this name: {_fmt_inr(room_to_cap)} "
-        f"(keep at least {_fmt_inr(min_wallet_cash_reserve_inr())} cash)"
-    )
-    txn_buy = buy_transaction_charge_inr()
-    txn_sell = sell_transaction_charge_inr()
-    if txn_buy > 0 or txn_sell > 0:
-        parts: list[str] = []
-        if txn_buy > 0:
-            parts.append(f"BUY {_fmt_inr(txn_buy)}")
-        if txn_sell > 0:
-            parts.append(
-                f"SELL {_fmt_inr(txn_sell)} (exit penalty: STT + DP + brokerage paper model)"
-            )
-        lines.append(
-            f"Paper transaction charges: {', '.join(parts)} — "
-            "cash and sell PnL reflect applicable charges"
-        )
 
     live_trades = load_recent_portfolio_trades(conn, ticker)
     lines.append("")
     lines.append("=== LIVE TRADE HISTORY (most recent first) ===")
     if live_trades:
         for t in live_trades:
-            pnl_str = "—" if t["realized_pnl"] is None else _fmt_inr(t["realized_pnl"])
+            pnl = "—" if t["realized_pnl"] is None else _fmt_inr(t["realized_pnl"])
             lines.append(
                 f"{t['trade_time']} {t['action']} {t['quantity']:.0f} @ {_fmt_inr(t['price'])} "
-                f"value {_fmt_inr(t['total_value'])} PnL {pnl_str}"
+                f"value {_fmt_inr(t['total_value'])} PnL {pnl}"
             )
     else:
         lines.append("No live paper trades recorded for this ticker.")
 
-    wallet_trades = load_recent_wallet_trades(conn)
+    trades = load_recent_wallet_trades(conn)
     lines.append("")
     lines.append("=== RECENT WALLET TRADES (all tickers) ===")
-    if wallet_trades:
-        for t in wallet_trades:
-            pnl_str = "—" if t["realized_pnl"] is None else _fmt_inr(t["realized_pnl"])
+    if trades:
+        for t in trades:
+            pnl = "—" if t["realized_pnl"] is None else _fmt_inr(t["realized_pnl"])
             lines.append(
                 f"{t['trade_time']} {t['ticker']} {t['action']} {t['quantity']:.0f} "
-                f"@ {_fmt_inr(t['price'])} value {_fmt_inr(t['total_value'])} PnL {pnl_str}"
+                f"@ {_fmt_inr(t['price'])} value {_fmt_inr(t['total_value'])} PnL {pnl}"
             )
     else:
         lines.append("No wallet-level trade history yet.")
 
-    wallet_transactions = load_recent_wallet_transactions(conn)
-    lines.append("")
-    lines.append("=== WALLET ACTIVITY LEDGER (cash movements and balances) ===")
-    if wallet_transactions:
-        for tx in wallet_transactions:
-            note = f" note={tx['note']}" if tx["note"] else ""
-            lines.append(
-                f"{tx['created_at']} {tx['type']} amount {_fmt_inr(tx['amount'])} "
-                f"balance_after {_fmt_inr(tx['balance_after'])}{note}"
-            )
-    else:
-        lines.append("No wallet transaction ledger rows found.")
-
-    ticker_execs = load_recent_ai_trade_executions(conn, ticker=ticker, limit=8)
-    wallet_execs = load_recent_ai_trade_executions(conn, limit=8)
-    lines.append("")
-    lines.append("=== AI EXECUTION HISTORY (recommendation outcomes and skips) ===")
-    if ticker_execs:
-        lines.append(f"Recent executions for {ticker}:")
-        for ex in ticker_execs:
-            pnl_str = "—" if ex["pnl"] is None else _fmt_inr(ex["pnl"])
-            price_str = "—" if ex["price"] is None else _fmt_inr(ex["price"])
-            reason = f", reason={ex['skip_reason']}" if ex["skip_reason"] else ""
-            dry = " dry-run" if ex["dry_run"] else ""
-            lines.append(
-                f"{ex['trade_date']} {ex['action_taken']}{dry} qty={ex['quantity']} "
-                f"price={price_str} pnl={pnl_str}{reason}"
-            )
-    else:
-        lines.append(f"No AI execution rows for {ticker}.")
-    if wallet_execs:
-        lines.append("Recent executions across wallet:")
-        for ex in wallet_execs:
-            pnl_str = "—" if ex["pnl"] is None else _fmt_inr(ex["pnl"])
-            reason = f", reason={ex['skip_reason']}" if ex["skip_reason"] else ""
-            lines.append(
-                f"{ex['trade_date']} {ex['ticker']} {ex['action_taken']} pnl={pnl_str}{reason}"
-            )
-
     summaries = load_backtest_strategy_summaries(conn, ticker)
     lines.append("")
     lines.append("=== BACKTEST STRATEGY SUMMARY (per ticker) ===")
+    bt_strategy = None
     if summaries:
         best = summaries[0]
         worst = summaries[-1] if len(summaries) > 1 else None
@@ -886,17 +558,16 @@ def build_analysis_context(
                 f"{s['strategy_name']}: return {_fmt_pct(float(s['total_return_pct']) if s['total_return_pct'] is not None else None)} "
                 f"trades={s['total_trades']} win={s['win_rate_pct']}% "
                 f"maxDD={s['max_drawdown_pct']}% expectancy={s['expectancy_pct']}% "
-                f"({s['date_from']} to {s['date_to']})"
+                f"avgHold={s['avg_holding_days']}d ({s['date_from']} to {s['date_to']})"
             )
         bt_strategy = best["strategy_name"]
         if worst and worst["strategy_name"] != best["strategy_name"]:
             lines.append(
                 f"Best backtest: {best['strategy_name']}; weakest: {worst['strategy_name']} — "
-                "avoid repeating high-churn losing patterns (e.g. MACD whipsaw)."
+                "avoid repeating high-churn losing patterns."
             )
     else:
         lines.append("No backtest results in database — run Backtest Lab for this ticker first.")
-        bt_strategy = None
 
     bt_trades = load_backtest_trades(
         conn, ticker, strategy_name=bt_strategy if summaries else None, limit=6
@@ -922,326 +593,67 @@ def build_analysis_context(
         lines.append("No prior AI recommendation history.")
 
     lines.append("")
-    lines.append("=== MANDATORY TRADING RULES (executor enforces these) ===")
-    lines.append(f"- Maximum {_fmt_inr(cap)} invested per stock (including adds).")
-    lines.append(
-        f"- Every live BUY has a mandatory {trailing_pct:.0f}% trailing stop; executor sells if LTP breaches it."
-    )
-    lines.append("- Wallet cash must never go negative; size buys within available cash.")
-    lines.append(
-        f"- Aim to harvest the best risk-adjusted exit within {exit_window_days} calendar days, "
-        "using backtests, live trade history, weekly structure, and current profit."
-    )
-    lines.append(
-        f"- The 90-day window is not a forced sell date; SELL/UNDERWEIGHT is allowed earlier "
-        f"when analysis indicates peak profit or thesis-break risk."
-    )
-    lines.append(
-        "- Before recommending SELL, review live trade history and backtest trade dates above; "
-        "do not churn like losing backtest strategies with many small whipsaw trades."
-    )
-    lines.append(
-        "- Analyse deeply: tie Rating to backtest evidence, live hold duration, and past AI stance consistency."
-    )
+    lines.append("=== HOLDINGS DISCIPLINE CHECKLIST (complete before any BUY) ===")
+    focus_qty = float(focus.get("quantity") or 0)
+    if focus_qty > 0:
+        lines.append(
+            f"Already holding {ticker}: do NOT recommend fresh BUY unless OVERWEIGHT with "
+            "explicit cap room and a repaired weekly thesis."
+        )
+    else:
+        lines.append(
+            f"No open lot in {ticker}: new BUY only if wallet reserve, per-stock cap, "
+            "and lessons/cool-off allow it."
+        )
+    try:
+        from trade_lessons import format_lessons_block
 
+        lines.append("")
+        lines.append(format_lessons_block(conn, ticker=ticker))
+    except Exception as exc:
+        logger.warning("format_lessons_block failed: %s", exc)
+        lines.append("")
+        lines.append("=== LESSONS FROM PAST MISTAKES ===")
+        lines.append("Lessons unavailable this run — still avoid revenge trades after losses.")
+
+    # Claude Skills Pack (5 screeners + TA/Nifty/VIX/trade plan) — BEFORE any agent signal.
+    lines.append("")
+    try:
+        from tradingagents.agents.utils.claude_skills_pack import build_claude_skills_context
+
+        lines.append(build_claude_skills_context(ticker))
+    except Exception as exc:
+        logger.warning("claude skills pack failed for %s: %s", ticker, exc)
+        lines.append("=== CLAUDE SKILLS PACK (observe BEFORE any Buy/Sell/Hold signal) ===")
+        lines.append(f"Skills pack unavailable: {exc}")
+        lines.append("Default to HOLD unless other evidence is overwhelming.")
+        lines.append("=== END CLAUDE SKILLS PACK ===")
+
+    lines.append("")
+    lines.append("=== MANDATORY TRADING RULES AND STRATEGY CONTEXT ===")
+    lines.append(f"- Maximum {_fmt_inr(MAX_POSITION_INR)} invested per stock; keep at least {_fmt_inr(MIN_WALLET_CASH_RESERVE_INR)} cash.")
+    lines.append(f"- Every live BUY has a mandatory {TRAILING_STOP_LOSS_PCT:.0f}% trailing stop.")
+    lines.append(
+        f"- Aim to harvest the best risk-adjusted exit within {SWING_EXIT_WINDOW_DAYS} calendar days; "
+        "this is not a forced sell date and not a minimum hold."
+    )
+    lines.append("- Before SELL, review all holdings, wallet cash, live trades, backtests, Claude Skills Pack consensus, and past AI stance consistency.")
+    lines.append("- After a realized loss on this ticker, cool off before re-buying (executor enforces cooldown).")
     return "\n".join(lines)
 
 
-def _deduct_transaction_charge(conn, *, ticker: str, action: str) -> float:
-    """Withdraw flat transaction charge from wallet (ledger type WITHDRAWAL)."""
-    charge = transaction_charge_for_action(action)
-    if charge <= 0:
-        return 0.0
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE wallet_accounts
-               SET current_cash = current_cash - %s, updated_at = now()
-             WHERE id = %s
-            RETURNING current_cash
-            """,
-            (charge, ADMIN_WALLET_ID),
-        )
-        row = cur.fetchone()
-        if not row:
-            raise ValueError(f"Wallet not found: {ADMIN_WALLET_ID}")
-        cash_after = float(row[0])
-        cur.execute(
-            """
-            INSERT INTO wallet_transactions (wallet_id, type, amount, balance_after, note)
-            VALUES (%s, 'WITHDRAWAL', %s, %s, %s)
-            """,
-            (
-                ADMIN_WALLET_ID,
-                charge,
-                cash_after,
-                f"txn_charge {action} {ticker.upper()}",
-            ),
-        )
-    return charge
-
-
-def _adjust_latest_sell_pnl(conn, ticker: str, charge: float) -> float | None:
-    """Subtract sell-leg charge from the most recent SELL row (net realized PnL)."""
-    if charge <= 0:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT realized_pnl FROM portfolio_trades
-                WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s) AND action = 'SELL'
-                ORDER BY trade_time DESC LIMIT 1
-                """,
-                (ADMIN_WALLET_ID, ticker),
-            )
-            row = cur.fetchone()
-        return float(row[0]) if row and row[0] is not None else None
-
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE portfolio_trades
-               SET realized_pnl = realized_pnl - %s
-             WHERE id = (
-               SELECT id FROM portfolio_trades
-               WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s) AND action = 'SELL'
-               ORDER BY trade_time DESC LIMIT 1
-             )
-            RETURNING realized_pnl
-            """,
-            (charge, ADMIN_WALLET_ID, ticker),
-        )
-        row = cur.fetchone()
-    return float(row[0]) if row and row[0] is not None else None
-
-
-def _is_holding_quantity_check_violation(exc: BaseException) -> bool:
-    """Return True when a SELL failed because holdings quantity would go negative."""
-    try:
-        from psycopg2.errors import CheckViolation
-    except ImportError:
-        CheckViolation = ()  # type: ignore[misc, assignment]
-
-    if isinstance(exc, CheckViolation):
-        return True
-
-    message = str(exc).lower()
-    return (
-        "portfolio_holdings_quantity_check" in message
-        or "violates check constraint" in message
-    )
-
-
-def _execute_sell_without_zero_holding_update(
+def execute_trade(
     conn,
     *,
     ticker: str,
+    action: str,
     quantity: float,
     price: float,
+    wallet_id: str = ADMIN_WALLET_ID,
 ) -> None:
-    """Execute a full or partial SELL without writing a zero holding quantity.
-
-    Used when selling the entire position (or leaving only float noise) so the
-    DB ``portfolio_holdings_quantity_check`` constraint is never tripped by a
-    transient ``quantity = 0`` update.
-
-    Parameters
-    ----------
-    conn
-        Open psycopg2 connection; caller must commit or rollback.
-    ticker
-        Exchange-qualified instrument symbol.
-    quantity
-        Share quantity to sell; must not exceed the current holding.
-    price
-        Execution reference price per share.
-
-    Returns
-    -------
-    None
-
-    Raises
-    ------
-    ValueError
-        If there is no open position or ``quantity`` exceeds the held amount.
-
-    Notes
-    -----
-    Holds the ``portfolio_holdings`` row with ``FOR UPDATE``. On a full exit,
-    deletes the holding and cancels active trailing stops instead of setting
-    quantity to zero.
-
-    ``realized_pnl`` is stored as gross ``(price - avg_entry) * quantity``.
-    Callers (``execute_trade``) net the sell-leg charge via
-    ``_adjust_latest_sell_pnl``, matching the ``execute_wallet_trade`` path.
-    """
-    total = quantity * price
     with conn.cursor() as cur:
         cur.execute(
-            """
-            SELECT avg_entry, quantity
-            FROM portfolio_holdings
-            WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s)
-            FOR UPDATE
-            """,
-            (ADMIN_WALLET_ID, ticker),
+            "SELECT execute_wallet_trade(%s::uuid, %s, %s, %s, %s)",
+            (wallet_id, ticker.upper(), action, quantity, price),
         )
-        row = cur.fetchone()
-        if not row:
-            raise ValueError(f"No open position to sell for {ticker}")
-
-        avg_entry = float(row[0] or 0)
-        held_qty = float(row[1] or 0)
-        if quantity > held_qty:
-            raise ValueError(
-                f"Cannot sell {quantity:g} {ticker}; current holding is {held_qty:g}"
-            )
-
-        remaining_qty = held_qty - quantity
-        realized = (price - avg_entry) * quantity
-        cur.execute(
-            """
-            UPDATE wallet_accounts
-               SET current_cash = current_cash + %s, updated_at = now()
-             WHERE id = %s
-            RETURNING current_cash
-            """,
-            (total, ADMIN_WALLET_ID),
-        )
-        cash_row = cur.fetchone()
-        if not cash_row:
-            raise ValueError(f"Wallet not found: {ADMIN_WALLET_ID}")
-
-        if remaining_qty <= 0:
-            cur.execute(
-                "DELETE FROM portfolio_holdings WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s)",
-                (ADMIN_WALLET_ID, ticker),
-            )
-            cur.execute(
-                """
-                UPDATE portfolio_trailing_stops
-                   SET status = 'CANCELLED', closed_at = now(), updated_at = now()
-                 WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s) AND status = 'ACTIVE'
-                """,
-                (ADMIN_WALLET_ID, ticker),
-            )
-        else:
-            cur.execute(
-                """
-                UPDATE portfolio_holdings
-                   SET quantity = %s, updated_at = now()
-                 WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s)
-                """,
-                (remaining_qty, ADMIN_WALLET_ID, ticker),
-            )
-            cur.execute(
-                """
-                UPDATE portfolio_trailing_stops
-                   SET quantity = %s, updated_at = now()
-                 WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s) AND status = 'ACTIVE'
-                """,
-                (remaining_qty, ADMIN_WALLET_ID, ticker),
-            )
-
-        cur.execute(
-            """
-            INSERT INTO portfolio_trades (
-              wallet_id, ticker, action, quantity, price, total_value, realized_pnl
-            )
-            VALUES (%s, %s, 'SELL', %s, %s, %s, %s)
-            """,
-            (ADMIN_WALLET_ID, ticker, quantity, price, total, realized),
-        )
-        cur.execute(
-            """
-            INSERT INTO wallet_transactions (wallet_id, type, amount, balance_after, note)
-            VALUES (%s, 'SELL', %s, %s, %s)
-            """,
-            (ADMIN_WALLET_ID, total, cash_row[0], ticker),
-        )
-
-
-def execute_trade(conn, *, ticker: str, action: str, quantity: float, price: float) -> float | None:
-    """
-    Execute paper trade via ``execute_wallet_trade``.
-
-    Parameters
-    ----------
-    conn
-        Open psycopg2 connection used to execute the wallet trade and ledger
-        updates.
-    ticker
-        Exchange-qualified instrument symbol.
-    action
-        Trade side, expected to be ``BUY`` or ``SELL``.
-    quantity
-        Share quantity to trade. The caller is responsible for applying any
-        whole-share or fractional-share policy before calling this function.
-    price
-        Validated execution reference price.
-
-    Returns
-    -------
-    float | None
-        Net realized PnL for ``SELL`` trades, otherwise ``None``.
-
-    Raises
-    ------
-    ValueError
-        If a ``BUY`` would breach available cash after charges and required
-        cash reserve.
-
-    Notes
-    -----
-    Applies per-leg charges from ``BUY_TRANSACTION_CHARGE_INR`` /
-    ``SELL_TRANSACTION_CHARGE_INR``. Charges are deducted from cash; ``SELL``
-    ``realized_pnl`` is net of the sell charge.
-    """
-    ticker = ticker.upper()
-    charge = transaction_charge_for_action(action)
-    use_manual_sell = False
-    if action == "BUY":
-        cash = load_wallet_cash(conn)
-        cost = quantity * price
-        total = cost + charge
-        min_cash = min_wallet_cash_reserve_inr()
-        if total > max(0.0, cash - min_cash):
-            raise ValueError(
-                f"Insufficient cash: need {_fmt_inr(total)} "
-                f"(trade {_fmt_inr(cost)} + charge {_fmt_inr(charge)}), "
-                f"have {_fmt_inr(cash)} and must keep {_fmt_inr(min_cash)}"
-            )
-    elif action == "SELL":
-        held_qty, _ = load_holding(conn, ticker)
-        if held_qty <= 0:
-            raise ValueError(f"No open position to sell for {ticker}")
-        if quantity > held_qty:
-            raise ValueError(
-                f"Cannot sell {quantity:g} {ticker}; current holding is {held_qty:g}"
-            )
-        use_manual_sell = (held_qty - quantity) <= QUANTITY_EPSILON
-    if use_manual_sell:
-        _execute_sell_without_zero_holding_update(
-            conn, ticker=ticker, quantity=quantity, price=price
-        )
-    else:
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT execute_wallet_trade(%s::uuid, %s, %s, %s, %s)",
-                    (ADMIN_WALLET_ID, ticker, action, quantity, price),
-                )
-        except Exception as exc:
-            if action == "SELL" and _is_holding_quantity_check_violation(exc):
-                conn.rollback()
-                _execute_sell_without_zero_holding_update(
-                    conn, ticker=ticker, quantity=quantity, price=price
-                )
-            else:
-                raise
-    net_pnl: float | None = None
-    if charge > 0:
-        _deduct_transaction_charge(conn, ticker=ticker, action=action)
-    if action == "SELL":
-        net_pnl = _adjust_latest_sell_pnl(conn, ticker, charge)
     conn.commit()
-    return net_pnl
