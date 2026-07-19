@@ -5,9 +5,9 @@ name: AI recommendations (cache)
 
 on:
   schedule:
-    # Weekdays 9:00 AM IST (3:30 AM UTC) — full batch: all tickers.
-    - cron: '30 3 * * 1-5'
-    # Weekdays 3:00 PM IST (9:30 AM UTC) — uncomment to enable second daily run (batch job `if` already matches this cron).
+    # Weekdays 5:30 AM IST (12:00 AM UTC) — full batch: all tickers.
+    - cron: '0 0 * * 1-5'
+    # Weekdays 3:00 PM IST (9:30 AM UTC) — uncomment to enable second daily run.
     # - cron: '30 9 * * 1-5'
   repository_dispatch:
     types: [ai-recommendation]
@@ -52,7 +52,7 @@ jobs:
     concurrency:
       group: ai-recommendations-batch-${{ github.repository }}
       cancel-in-progress: false
-    if: (github.event_name == 'schedule' && github.event.schedule == '30 3 * * 1-5') || (github.event_name == 'repository_dispatch' && github.event.action == 'ai-recommendation') || (github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'batch' || github.event.inputs.mode == 'both' || github.event.inputs.mode == ''))
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 0 * * 1-5') || (github.event_name == 'repository_dispatch' && github.event.action == 'ai-recommendation') || (github.event_name == 'workflow_dispatch' && (github.event.inputs.mode == 'batch' || github.event.inputs.mode == 'both' || github.event.inputs.mode == ''))
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -171,6 +171,9 @@ jobs:
 
           echo "--- AI paper-trade executor (autonomous — uses ai_trading_settings) ---"
           python agent/execute_ai_trades.py --all --trade-date "$DATE" || echo "::warning::execute_ai_trades.py exited non-zero"
+
+          echo "--- Learn from closed trades (persist lessons for next runs) ---"
+          python agent/write_reflection_memory.py --lookback-days 45 --limit 50 || echo "::warning::write_reflection_memory.py exited non-zero"
 
           echo "processed_count=$COUNT" >> "$GITHUB_OUTPUT"
           echo "success_count=$OK" >> "$GITHUB_OUTPUT"

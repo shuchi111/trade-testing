@@ -1,0 +1,93 @@
+# Tooling config for CI (ruff / codespell / bandit / pytest).
+# Same stack as swing-trading-dev / tradermonty/claude-trading-skills.
+
+[project]
+name = "trade-circleci-cron"
+version = "0.1.0"
+description = "GitHub Actions cron runners for AI + ML paper desks"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.4.0",
+  "pytest-cov>=4.1.0",
+  "ruff==0.9.6",
+  "bandit[toml]>=1.9.0",
+  "detect-secrets>=1.5.0",
+  "codespell>=2.3.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["agent", "agent-swing", "tests", "scripts"]
+extend-exclude = [
+  "**/data_cache",
+  "**/eval_results",
+  "**/results",
+  "**/reports",
+  "**/.cache",
+  "node_modules",
+  ".next",
+]
+
+[tool.ruff.lint]
+# Start with E/F/W (skills-pack also uses I/UP/B — tighten later once debt is cleared)
+select = ["E", "F", "W"]
+ignore = [
+  "E501", # line-too-long (formatter / prompts)
+  "E402", # module-level import not at top (sys.path in scripts/tests)
+  "F401", # unused-import (clean incrementally)
+  "F403", # star-import
+  "F405", # star-import usage
+  "F841", # unused-variable (clean incrementally)
+  "F541", # f-string missing placeholders
+  "W291", # trailing whitespace in long prompt strings
+  "W293", # blank line whitespace in docstrings
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["E402"]
+"**/test_*.py" = ["E402"]
+"tests/**" = ["E402"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "agent-swing/tests"]
+pythonpath = ["agent"]
+addopts = "-q"
+
+[tool.bandit]
+targets = ["agent", "agent-swing"]
+exclude_dirs = [
+  "agent/tests",
+  "agent-swing/tests",
+  "tests",
+  "**/data_cache",
+  "**/eval_results",
+  "**/results",
+  "**/reports",
+]
+skips = [
+  "B101", # assert used
+  "B110", # try-except-pass
+  "B112", # try-except-continue
+  "B113", # requests without timeout (dataflows; tighten later)
+  "B310", # urllib urlopen (timeouts used in dataflows)
+  "B311", # random for non-crypto
+  "B314", # xml.etree (reddit RSS; trust boundary is remote feed)
+  "B404", # import subprocess
+  "B405", # xml.etree import
+  "B603", # subprocess without shell
+  "B608", # possible SQL string formatting (parameterized paths preferred; legacy)
+]
+
+[tool.codespell]
+skip = ".venv,venv,node_modules,.next,*.json,*.csv,*.baseline,*.pyc,__pycache__,data_cache,eval_results,results,package-lock.json"
+ignore-words-list = "trough,ore,cna,acn,blok,hims,pont,claus,theses,nd,te,fo,ba,cach,strat,plad,zar,hsi,ist"
