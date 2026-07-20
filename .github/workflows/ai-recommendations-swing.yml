@@ -42,6 +42,10 @@ env:
   QUICK_THINK_LLM: glm-5.2
   ANTHROPIC_BASE_URL: https://api.z.ai/api/anthropic
   SELL_TRANSACTION_CHARGE_INR: '150'
+  # GitHub Actions IPs are WAF-blocked on old.reddit JSON (403); RSS is 1 req/sub.
+  REDDIT_FETCH_MODE: rss
+  REDDIT_INTER_REQUEST_DELAY_SEC: '8'
+  REDDIT_RSS_FALLBACK: '0'
 
 jobs:
   batch:
