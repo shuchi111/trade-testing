@@ -7,11 +7,7 @@ on:
   schedule:
     # Weekdays 5:30 AM IST (12:00 AM UTC) — full batch: all tickers.
     - cron: '0 0 * * 1-5'
-<<<<<<< HEAD
     # Weekdays 3:00 PM IST (9:30 AM UTC) — uncomment to enable second daily run (batch job `if` already matches this cron).
-=======
-    # Weekdays 3:00 PM IST (9:30 AM UTC) — uncomment to enable second daily run.
->>>>>>> 3aa7dd3f5ac6b9f7198233cdf5301829e2e6ec03
     # - cron: '30 9 * * 1-5'
   repository_dispatch:
     types: [ai-recommendation]
