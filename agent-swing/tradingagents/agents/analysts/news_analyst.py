@@ -20,6 +20,7 @@ from tradingagents.agents.utils.claude_skills_pack import (
     _SKILLS_OBSERVE_PREAMBLE,
     skills_observe_excerpt,
 )
+from tradingagents.agents.utils.swing_policy import portfolio_observe_excerpt
 from tradingagents.agents.utils.prefetch_context import (
     format_fred_appendix,
     format_news_appendix,
@@ -42,7 +43,9 @@ def create_news_analyst(llm):
         asset_type = state.get("asset_type", "equity")
         asset_label = "company" if asset_type in ("equity", "stock") else "asset"
         instrument_context = get_instrument_context_from_state(state)
-        skills_block = skills_observe_excerpt(state.get("portfolio_context", ""))
+        ctx = state.get("portfolio_context", "")
+        skills_block = skills_observe_excerpt(ctx)
+        portfolio_digest = portfolio_observe_excerpt(ctx)
 
         news_block = get_news.func(ticker, start_date, current_date)
         global_news_block = get_global_news.func(current_date, 7, 10)
@@ -91,6 +94,8 @@ When Polymarket or Reddit/StockTwits blocks show unavailable placeholders, say s
 
 {_SKILLS_OBSERVE_PREAMBLE}{skills_block}
 === END SKILLS PACK EXCERPT ===
+
+{portfolio_digest}
 
 {get_language_instruction()}"""
 

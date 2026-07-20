@@ -281,11 +281,14 @@ def load_recent_portfolio_trades(conn, ticker: str, limit: int = 5) -> list[dict
 
 
 def load_recent_ai_recommendations(conn, ticker: str, limit: int = 8) -> list[dict[str, Any]]:
+    """Prior AI stances with signal metrics + short PM excerpt when columns exist."""
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT trade_date, decision, bucket, reference_price
+                SELECT trade_date, decision, bucket, reference_price,
+                       signal_action, target_price, stop_loss_price,
+                       risk_reward_ratio, ai_confidence_pct, final_trade_decision
                 FROM ai_recommendation_history
                 WHERE UPPER(ticker) = UPPER(%s)
                 ORDER BY trade_date DESC, computed_at DESC
@@ -295,16 +298,153 @@ def load_recent_ai_recommendations(conn, ticker: str, limit: int = 8) -> list[di
             )
             rows = cur.fetchall()
     except Exception:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT trade_date, decision, bucket, reference_price
+                    FROM ai_recommendation_history
+                    WHERE UPPER(ticker) = UPPER(%s)
+                    ORDER BY trade_date DESC, computed_at DESC
+                    LIMIT %s
+                    """,
+                    (ticker, limit),
+                )
+                rows = cur.fetchall()
+            return [
+                {
+                    "trade_date": r[0],
+                    "decision": r[1] or "",
+                    "bucket": r[2] or "",
+                    "reference_price": None if r[3] is None else float(r[3]),
+                    "signal_action": "",
+                    "target_price": None,
+                    "stop_loss_price": None,
+                    "risk_reward_ratio": None,
+                    "ai_confidence_pct": None,
+                    "excerpt": "",
+                }
+                for r in rows
+            ]
+        except Exception:
+            return []
+
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        pm = str(r[9] or "").strip() if len(r) > 9 else ""
+        excerpt = " ".join(pm.split())
+        if len(excerpt) > 220:
+            excerpt = excerpt[:217] + "..."
+        out.append(
+            {
+                "trade_date": r[0],
+                "decision": r[1] or "",
+                "bucket": r[2] or "",
+                "reference_price": None if r[3] is None else float(r[3]),
+                "signal_action": (r[4] or "") if len(r) > 4 else "",
+                "target_price": None if len(r) <= 5 or r[5] is None else float(r[5]),
+                "stop_loss_price": None if len(r) <= 6 or r[6] is None else float(r[6]),
+                "risk_reward_ratio": None if len(r) <= 7 or r[7] is None else float(r[7]),
+                "ai_confidence_pct": None if len(r) <= 8 or r[8] is None else float(r[8]),
+                "excerpt": excerpt,
+            }
+        )
+    return out
+
+
+def load_recent_ai_trade_executions(
+    conn, ticker: str, *, limit: int = 8, include_dry_run: bool = False
+) -> list[dict[str, Any]]:
+    """Recent autonomous executor fills / skips for this ticker."""
+    try:
+        with conn.cursor() as cur:
+            if include_dry_run:
+                cur.execute(
+                    """
+                    SELECT trade_date, decision, action_taken, quantity, price, pnl,
+                           skip_reason, dry_run, created_at
+                    FROM ai_trade_executions
+                    WHERE UPPER(ticker) = UPPER(%s)
+                    ORDER BY trade_date DESC, created_at DESC
+                    LIMIT %s
+                    """,
+                    (ticker, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT trade_date, decision, action_taken, quantity, price, pnl,
+                           skip_reason, dry_run, created_at
+                    FROM ai_trade_executions
+                    WHERE UPPER(ticker) = UPPER(%s) AND dry_run = false
+                    ORDER BY trade_date DESC, created_at DESC
+                    LIMIT %s
+                    """,
+                    (ticker, limit),
+                )
+            rows = cur.fetchall()
+    except Exception:
         return []
-    return [
-        {
-            "trade_date": r[0],
-            "decision": r[1] or "",
-            "bucket": r[2] or "",
-            "reference_price": None if r[3] is None else float(r[3]),
-        }
-        for r in rows
-    ]
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "trade_date": r[0],
+                "decision": r[1] or "",
+                "action_taken": r[2] or "",
+                "quantity": None if r[3] is None else float(r[3]),
+                "price": None if r[4] is None else float(r[4]),
+                "pnl": None if r[5] is None else float(r[5]),
+                "skip_reason": r[6] or "",
+                "dry_run": bool(r[7]),
+                "created_at": r[8],
+            }
+        )
+    return out
+
+
+def load_portfolio_trade_quality(conn, wallet_id: str = ADMIN_WALLET_ID) -> dict[str, Any]:
+    """Book-level closed-trade quality from portfolio_trades (SELL rows with PnL)."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  COUNT(*) FILTER (WHERE action = 'SELL' AND realized_pnl IS NOT NULL),
+                  COUNT(*) FILTER (WHERE action = 'SELL' AND realized_pnl > 0),
+                  COUNT(*) FILTER (WHERE action = 'SELL' AND realized_pnl < 0),
+                  COALESCE(SUM(realized_pnl) FILTER (WHERE action = 'SELL'), 0),
+                  COALESCE(AVG(realized_pnl) FILTER (WHERE action = 'SELL' AND realized_pnl IS NOT NULL), 0),
+                  COALESCE(SUM(realized_pnl) FILTER (WHERE action = 'SELL' AND realized_pnl > 0), 0),
+                  COALESCE(SUM(ABS(realized_pnl)) FILTER (WHERE action = 'SELL' AND realized_pnl < 0), 0)
+                FROM portfolio_trades
+                WHERE wallet_id = %s
+                """,
+                (wallet_id,),
+            )
+            row = cur.fetchone()
+    except Exception:
+        return {}
+    if not row:
+        return {}
+    closed = int(row[0] or 0)
+    wins = int(row[1] or 0)
+    losses = int(row[2] or 0)
+    realized = float(row[3] or 0)
+    expectancy = float(row[4] or 0)
+    gross_profit = float(row[5] or 0)
+    gross_loss = float(row[6] or 0)
+    win_rate = (wins / closed * 100.0) if closed else None
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (None if gross_profit <= 0 else float("inf"))
+    return {
+        "closed_trades": closed,
+        "wins": wins,
+        "losses": losses,
+        "win_rate_pct": win_rate,
+        "realized_pnl": realized,
+        "expectancy": expectancy,
+        "profit_factor": profit_factor,
+    }
 
 
 def load_backtest_strategy_summaries(conn, ticker: str, limit: int = 8) -> list[dict[str, Any]]:
@@ -427,7 +567,7 @@ def build_analysis_context(
     total_mark = 0.0
     lines: list[str] = [
         "=== WEBSITE CONTEXT COVERAGE ===",
-        "Use every section below as if reviewing the website tabs before deciding: wallet, holdings, holding dates, live trades, backtests, prior AI history, active stops, and mandatory rules.",
+        "Use every section below as if reviewing the website tabs before deciding: wallet, holdings, holding dates, live trades, AI executions, backtests, prior AI history, active stops, and mandatory rules.",
         "",
         "=== LIVE PORTFOLIO ===",
     ]
@@ -440,6 +580,26 @@ def build_analysis_context(
         f"Open cost {_fmt_inr(total_cost)} | Estimated holdings value {_fmt_inr(total_mark)} | "
         f"Estimated equity {_fmt_inr(cash + total_mark)}"
     )
+
+    quality = load_portfolio_trade_quality(conn)
+    if quality.get("closed_trades"):
+        pf = quality.get("profit_factor")
+        if pf is None:
+            pf_text = "n/a"
+        elif pf == float("inf"):
+            pf_text = "∞"
+        else:
+            pf_text = f"{pf:.2f}"
+        lines.append(
+            f"Trade quality (closed SELLs): closed={quality['closed_trades']} "
+            f"wins={quality['wins']} losses={quality['losses']} "
+            f"win_rate={_fmt_pct(quality.get('win_rate_pct')).replace('+', '')} "
+            f"realised_PnL={_fmt_inr(quality.get('realized_pnl'))} "
+            f"expectancy/trade={_fmt_inr(quality.get('expectancy'))} "
+            f"profit_factor={pf_text}"
+        )
+    else:
+        lines.append("Trade quality: no closed SELL PnL rows yet — treat edge as unproven.")
 
     lines.append("")
     lines.append("=== ALL OPEN HOLDINGS (purchase date and days held) ===")
@@ -507,10 +667,27 @@ def build_analysis_context(
     else:
         lines.append("No wallet-level trade history yet.")
 
+    executions = load_recent_ai_trade_executions(conn, ticker, limit=8)
+    lines.append("")
+    lines.append("=== AI EXECUTION HISTORY (autonomous executor) ===")
+    if executions:
+        for e in executions:
+            qty = "—" if e["quantity"] is None else f"{e['quantity']:.0f}"
+            price = "—" if e["price"] is None else _fmt_inr(e["price"])
+            pnl = "—" if e["pnl"] is None else _fmt_inr(e["pnl"])
+            skip = f" skip={e['skip_reason']}" if e.get("skip_reason") else ""
+            lines.append(
+                f"{e['trade_date']} decision={e['decision'] or '—'} "
+                f"action={e['action_taken']} qty={qty} @ {price} PnL={pnl}{skip}"
+            )
+    else:
+        lines.append("No AI execution rows yet for this ticker.")
+
     summaries = load_backtest_strategy_summaries(conn, ticker)
     lines.append("")
     lines.append("=== BACKTEST STRATEGY SUMMARY (per ticker) ===")
-    bt_strategy = None
+    best_name = None
+    worst_name = None
     if summaries:
         best = summaries[0]
         worst = summaries[-1] if len(summaries) > 1 else None
@@ -521,27 +698,41 @@ def build_analysis_context(
                 f"maxDD={s['max_drawdown_pct']}% expectancy={s['expectancy_pct']}% "
                 f"avgHold={s['avg_holding_days']}d ({s['date_from']} to {s['date_to']})"
             )
-        bt_strategy = best["strategy_name"]
+        best_name = best["strategy_name"]
         if worst and worst["strategy_name"] != best["strategy_name"]:
+            worst_name = worst["strategy_name"]
             lines.append(
-                f"Best backtest: {best['strategy_name']}; weakest: {worst['strategy_name']} — "
+                f"Best backtest: {best_name}; weakest: {worst_name} — "
                 "avoid repeating high-churn losing patterns."
             )
     else:
         lines.append("No backtest results in database — run Backtest Lab for this ticker first.")
 
-    bt_trades = load_backtest_trades(
-        conn, ticker, strategy_name=bt_strategy if summaries else None, limit=6
-    )
     lines.append("")
     lines.append("=== BACKTEST TRADE LOG (recent simulated trades) ===")
-    if bt_trades:
-        for t in bt_trades:
+    bt_best = load_backtest_trades(conn, ticker, strategy_name=best_name, limit=5) if best_name else []
+    bt_worst = (
+        load_backtest_trades(conn, ticker, strategy_name=worst_name, limit=4)
+        if worst_name
+        else []
+    )
+    if not bt_best and not bt_worst:
+        bt_best = load_backtest_trades(conn, ticker, strategy_name=None, limit=6)
+    if bt_best:
+        lines.append(f"-- Best / primary strategy sample ({best_name or 'mixed'}) --")
+        for t in bt_best:
             lines.append(
                 f"{t['entry_date']} → {t['exit_date']} {_fmt_pct(float(t['return_pct']) if t['return_pct'] is not None else None)} "
                 f"[{t['strategy_name']}] entry: {t['entry_reason'][:80]} | exit: {t['exit_reason'][:80]}"
             )
-    else:
+    if bt_worst:
+        lines.append(f"-- Weakest strategy sample ({worst_name}) — churn / loss patterns --")
+        for t in bt_worst:
+            lines.append(
+                f"{t['entry_date']} → {t['exit_date']} {_fmt_pct(float(t['return_pct']) if t['return_pct'] is not None else None)} "
+                f"[{t['strategy_name']}] entry: {t['entry_reason'][:80]} | exit: {t['exit_reason'][:80]}"
+            )
+    if not bt_best and not bt_worst:
         lines.append("No backtest trade log rows for this ticker.")
 
     recos = load_recent_ai_recommendations(conn, ticker)
@@ -549,7 +740,22 @@ def build_analysis_context(
     lines.append("=== PAST AI RECOMMENDATIONS ===")
     if recos:
         for r in recos:
-            lines.append(f"{r['trade_date']} {r['decision']} (bucket={r['bucket']})")
+            bits = [f"{r['trade_date']} {r['decision']} (bucket={r['bucket']})"]
+            if r.get("signal_action"):
+                bits.append(f"action={r['signal_action']}")
+            if r.get("reference_price") is not None:
+                bits.append(f"ref={_fmt_inr(r['reference_price'])}")
+            if r.get("target_price") is not None:
+                bits.append(f"target={_fmt_inr(r['target_price'])}")
+            if r.get("stop_loss_price") is not None:
+                bits.append(f"stop={_fmt_inr(r['stop_loss_price'])}")
+            if r.get("risk_reward_ratio") is not None:
+                bits.append(f"R:R={r['risk_reward_ratio']:.2f}")
+            if r.get("ai_confidence_pct") is not None:
+                bits.append(f"conf={r['ai_confidence_pct']:.0f}%")
+            lines.append(" | ".join(bits))
+            if r.get("excerpt"):
+                lines.append(f"  excerpt: {r['excerpt']}")
     else:
         lines.append("No prior AI recommendation history.")
 
@@ -598,7 +804,7 @@ def build_analysis_context(
         f"- Aim to harvest the best risk-adjusted exit within {SWING_EXIT_WINDOW_DAYS} calendar days; "
         "this is not a forced sell date and not a minimum hold."
     )
-    lines.append("- Before SELL, review all holdings, wallet cash, live trades, backtests, Claude Skills Pack consensus, and past AI stance consistency.")
+    lines.append("- Before SELL, review all holdings, wallet cash, live trades, AI executions, backtests, Claude Skills Pack consensus, and past AI stance consistency.")
     lines.append("- After a realized loss on this ticker, cool off before re-buying (executor enforces cooldown).")
     return "\n".join(lines)
 

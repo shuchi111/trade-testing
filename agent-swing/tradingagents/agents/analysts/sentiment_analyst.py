@@ -37,6 +37,7 @@ from tradingagents.agents.utils.claude_skills_pack import (
     _SKILLS_OBSERVE_PREAMBLE,
     skills_observe_excerpt,
 )
+from tradingagents.agents.utils.swing_policy import portfolio_observe_excerpt
 from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
@@ -68,7 +69,9 @@ def create_sentiment_analyst(llm):
         end_date = state["trade_date"]
         start_date = _seven_days_back(end_date)
         instrument_context = get_instrument_context_from_state(state)
-        skills_block = skills_observe_excerpt(state.get("portfolio_context", ""))
+        ctx = state.get("portfolio_context", "")
+        skills_block = skills_observe_excerpt(ctx)
+        portfolio_digest = portfolio_observe_excerpt(ctx)
 
         # Pre-fetch all three sources. Each fetcher degrades gracefully and
         # returns a string (no exceptions surface from here), so the LLM
@@ -85,6 +88,7 @@ def create_sentiment_analyst(llm):
             stocktwits_block=stocktwits_block,
             reddit_block=reddit_block,
             skills_block=skills_block,
+            portfolio_digest=portfolio_digest,
         )
 
         prompt = ChatPromptTemplate.from_messages(
@@ -145,6 +149,7 @@ def _build_system_message(
     stocktwits_block: str,
     reddit_block: str,
     skills_block: str = "",
+    portfolio_digest: str = "",
 ) -> str:
     """Assemble the sentiment-analyst system message with structured data blocks."""
     return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on three complementary data sources that have already been collected for you.
@@ -174,6 +179,8 @@ Community discussion. Engagement signal via upvote score and comment count. Subr
 
 {_SKILLS_OBSERVE_PREAMBLE}{skills_block}
 === END SKILLS PACK EXCERPT ===
+
+{portfolio_digest}
 
 ## How to analyze this data (best practices)
 

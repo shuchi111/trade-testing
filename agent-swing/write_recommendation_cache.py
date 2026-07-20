@@ -48,7 +48,9 @@ from tradingagents.graph.confidence_extraction import (
     build_quick_llm_from_config,
     extract_confidence_pct,
 )
+from tradingagents.graph.decision_context import enforce_holdings_decision
 from tradingagents.graph.report_builder import build_complete_report
+from tradingagents.graph.reporting import save_run_reports
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 logger = logging.getLogger("write_recommendation_cache")
@@ -551,12 +553,38 @@ def run_single_recommendation(
             str(decision or ""),
             str(final_trade_decision),
         )
+        decision, guard_note = enforce_holdings_decision(
+            str(decision or ""),
+            portfolio_context,
+            ticker,
+        )
+        if guard_note:
+            logger.warning("Holdings decision guard for %s: %s", ticker, guard_note)
 
         full_report = build_complete_report(
             final_state,
             portfolio_context=portfolio_context,
             canonical_decision=decision,
+            guard_note=guard_note,
         )
+        try:
+            report_paths = save_run_reports(
+                final_state,
+                ticker=ticker,
+                trade_date=trade_date,
+                project_dir=cfg.get("project_dir"),
+                canonical_decision=decision,
+                portfolio_context=portfolio_context,
+                guard_note=guard_note,
+            )
+            logger.info(
+                "Saved CLI agent reports for %s trade_date=%s → %s",
+                ticker,
+                trade_date,
+                report_paths.get("report_tree_dir"),
+            )
+        except Exception as report_err:
+            logger.warning("Could not save CLI report files for %s: %s", ticker, report_err)
         if not str(full_report or "").strip():
             logger.warning(
                 "full_report empty for %s trade_date=%s — UI full report will be unavailable",
