@@ -7,6 +7,11 @@ from tradingagents.agents.utils.swing_policy import (
     SWING_MANAGERS_BLOCK,
     format_live_portfolio_context,
 )
+from tradingagents.graph.decision_context import (
+    build_holdings_rules_block,
+    build_prior_agents_digest,
+    parse_ticker_holding,
+)
 
 
 def create_portfolio_manager(llm: Any, memory: Any) -> Callable[[dict[str, Any]], dict[str, Any]]:
@@ -74,6 +79,9 @@ def create_portfolio_manager(llm: Any, memory: Any) -> Callable[[dict[str, Any]]
             f"No open position in {state['company_of_interest']}."
         )
         live_ctx = format_live_portfolio_context(portfolio_context)
+        holding = parse_ticker_holding(portfolio_context, state["company_of_interest"])
+        holdings_rules = build_holdings_rules_block(holding)
+        prior_agents = build_prior_agents_digest(state)
 
         curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
         past_memories = memory.get_memories(curr_situation, n_matches=2)
@@ -83,12 +91,22 @@ def create_portfolio_manager(llm: Any, memory: Any) -> Callable[[dict[str, Any]]
 synthesize the risk analysts' debate and deliver the final trading decision.
 
 CRITICAL PROCESS (do in order):
-1) Read the FULL LIVE PORTFOLIO CONTEXT (DB: holdings, trades, past AI decisions, backtests, lessons).
-2) OBSERVE the CLAUDE SKILLS PACK block: VCP, PEAD, Relative Strength, Volume Breakout, Momentum,
-   connected consensus, Nifty / India VIX gate, and skills trade plan — before any Rating.
-3) Cross-check the trader plan and risk debate against that context and skills consensus.
-4) Think carefully about capital risk — then decide Buy / Overweight / Hold / Underweight / Sell.
-Never decide from analyst narrative alone while ignoring holdings, past losses, or screener conflicts.
+1) Read HOLDINGS CONSTRAINTS — verify qty held for this ticker BEFORE any Rating.
+2) Read the FULL LIVE PORTFOLIO CONTEXT (DB: holdings, trades, past AI decisions, backtests, lessons).
+3) OBSERVE the CLAUDE SKILLS PACK block: VCP, PEAD, Relative Strength, Volume Breakout, Momentum,
+   connected consensus, Nifty / India VIX gate, and skills trade plan.
+4) Read EVERY prior agent output in PRIOR AGENT OUTPUTS (all 11 agents before you).
+5) Cross-check trader plan and risk debate against holdings, skills consensus, and agent history.
+6) Think carefully about capital risk — then decide Buy / Overweight / Hold / Underweight / Sell.
+
+HARD RULES (never violate):
+- If quantity held is 0: Sell and Underweight are FORBIDDEN — use Hold (or Buy/Overweight only if entry justified).
+- If already holding: do not rate Buy unless you mean Overweight (add) with cap room.
+- Never decide from analyst narrative alone while ignoring holdings, past losses, or screener conflicts.
+
+{holdings_rules}
+
+{prior_agents}
 
 {SWING_MANAGERS_BLOCK}
 

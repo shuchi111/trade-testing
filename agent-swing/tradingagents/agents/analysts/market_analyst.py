@@ -4,14 +4,19 @@ from tradingagents.agents.utils.claude_skills_pack import (
     _SKILLS_OBSERVE_PREAMBLE,
     skills_observe_excerpt,
 )
-from tradingagents.agents.utils.swing_policy import SWING_MARKET_ANALYST_INSTRUCTIONS
+from tradingagents.agents.utils.swing_policy import (
+    SWING_MARKET_ANALYST_INSTRUCTIONS,
+    portfolio_observe_excerpt,
+)
 
 
 def create_market_analyst(llm):
     def market_analyst_node(state):
         current_date = state["trade_date"]
         instrument_context = build_instrument_context(state["company_of_interest"])
-        skills_block = skills_observe_excerpt(state.get("portfolio_context", ""))
+        ctx = state.get("portfolio_context", "")
+        skills_block = skills_observe_excerpt(ctx)
+        portfolio_digest = portfolio_observe_excerpt(ctx)
 
         tools = [get_stock_data, get_indicators]
 
@@ -45,7 +50,9 @@ Then use get_indicators with the specific indicator names. Write a detailed, nua
             + SWING_MARKET_ANALYST_INSTRUCTIONS
             + _SKILLS_OBSERVE_PREAMBLE
             + skills_block
-            + "\n=== END SKILLS PACK EXCERPT ===\n"
+            + "\n=== END SKILLS PACK EXCERPT ===\n\n"
+            + portfolio_digest
+            + "\n"
         )
 
         prompt = ChatPromptTemplate.from_messages(

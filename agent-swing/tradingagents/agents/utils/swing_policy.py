@@ -16,17 +16,19 @@ website pages (wallet, holdings, trades, AI history, backtests, lessons) PLUS th
 Claude Skills Pack (5 screeners + TA/Nifty/India VIX/trade plan). Treat it as ground
 truth. You MUST silently complete this checklist, then decide wisely:
 
-1. LIVE PORTFOLIO — wallet cash, open position count, estimated equity, trade-quality
-   (win rate, realised PnL, profit factor, expectancy).
+1. LIVE PORTFOLIO — wallet cash, open position count, estimated equity, and trade-quality
+   stats when present (win rate, realised PnL, profit factor, expectancy).
 2. ALL OPEN HOLDINGS — every ticker: qty, avg entry, purchase date, days held,
    mark, unrealized PnL, trailing stop, cap room. Note how many names are underwater.
 3. CURRENT TICKER FOCUS — whether we already hold this name; basis = average entry
    if held; days held inside the 90-day swing window; active stop.
 4. LIVE TRADE HISTORY — prior BUY/SELL fills and realised PnL for this ticker.
-5. RECENT WALLET TRADES + WALLET ACTIVITY — book-wide behaviour and cash moves.
+5. RECENT WALLET TRADES — book-wide fill behaviour across tickers.
 6. AI EXECUTION HISTORY — what the autonomous executor actually did / skipped and why.
-7. BACKTEST STRATEGY SUMMARY + BACKTEST TRADE LOG — avoid repeating high-churn losers.
-8. PAST AI RECOMMENDATIONS + report excerpts — prior stance consistency and mistakes.
+7. BACKTEST STRATEGY SUMMARY + BACKTEST TRADE LOG — best and weakest samples; avoid
+   repeating high-churn losers.
+8. PAST AI RECOMMENDATIONS — prior stance, targets/stops/confidence, and short excerpts;
+   do not flip-flop without new evidence.
 9. HOLDINGS DISCIPLINE CHECKLIST + LESSONS FROM PAST MISTAKES — binding scar tissue;
    no revenge BUY after a recent loss on this name.
 10. CLAUDE SKILLS PACK (MANDATORY OBSERVE BEFORE ANY SIGNAL) — read VCP, PEAD,
@@ -73,6 +75,46 @@ def format_live_portfolio_context(portfolio_context: str) -> str:
         f"=== LIVE PORTFOLIO CONTEXT (from database / website pages — READ FULLY) ===\n"
         f"{ctx}\n"
         f"=== END LIVE PORTFOLIO CONTEXT ==="
+    )
+
+
+def portfolio_observe_excerpt(portfolio_context: str, limit: int = 2200) -> str:
+    """Compact holdings / trades / discipline digest for analyst prompts."""
+    ctx = (portfolio_context or "").strip()
+    if not ctx:
+        return (
+            "No portfolio context supplied. Assume flat / unverified holdings — "
+            "prefer HOLD and do not invent positions."
+        )
+
+    wanted = (
+        "=== LIVE PORTFOLIO ===",
+        "=== CURRENT TICKER FOCUS ===",
+        "=== LIVE TRADE HISTORY",
+        "=== AI EXECUTION HISTORY",
+        "=== PAST AI RECOMMENDATIONS ===",
+        "=== HOLDINGS DISCIPLINE CHECKLIST",
+        "=== LESSONS FROM PAST MISTAKES ===",
+    )
+    chunks: list[str] = []
+    for marker in wanted:
+        start = ctx.find(marker)
+        if start < 0:
+            continue
+        rest = ctx[start:]
+        nxt = rest.find("\n=== ", len(marker))
+        block = rest if nxt < 0 else rest[:nxt]
+        chunks.append(block.strip())
+
+    digest = "\n\n".join(chunks).strip()
+    if not digest:
+        digest = ctx[:limit]
+    if len(digest) > limit:
+        digest = digest[:limit] + "\n... (portfolio digest truncated for prompt size)"
+    return (
+        "=== PORTFOLIO DIGEST FOR ANALYSTS (ground truth — observe before signalling) ===\n"
+        f"{digest}\n"
+        "=== END PORTFOLIO DIGEST ==="
     )
 
 

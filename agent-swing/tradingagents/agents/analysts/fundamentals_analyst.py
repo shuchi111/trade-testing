@@ -11,6 +11,7 @@ from tradingagents.agents.utils.claude_skills_pack import (
     _SKILLS_OBSERVE_PREAMBLE,
     skills_observe_excerpt,
 )
+from tradingagents.agents.utils.swing_policy import portfolio_observe_excerpt
 from tradingagents.dataflows.config import get_config
 
 
@@ -18,7 +19,9 @@ def create_fundamentals_analyst(llm):
     def fundamentals_analyst_node(state):
         current_date = state["trade_date"]
         instrument_context = build_instrument_context(state["company_of_interest"])
-        skills_block = skills_observe_excerpt(state.get("portfolio_context", ""))
+        ctx = state.get("portfolio_context", "")
+        skills_block = skills_observe_excerpt(ctx)
+        portfolio_digest = portfolio_observe_excerpt(ctx)
 
         tools = [get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement]
 
@@ -31,7 +34,9 @@ def create_fundamentals_analyst(llm):
             " Note any PEAD / earnings-related skills-pack stage when fundamentals intersect with recent results."
             + _SKILLS_OBSERVE_PREAMBLE
             + skills_block
-            + "\n=== END SKILLS PACK EXCERPT ===\n"
+            + "\n=== END SKILLS PACK EXCERPT ===\n\n"
+            + portfolio_digest
+            + "\n"
         )
 
         prompt = ChatPromptTemplate.from_messages(
