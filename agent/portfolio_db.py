@@ -616,19 +616,6 @@ def build_analysis_context(
         lines.append("=== LESSONS FROM PAST MISTAKES ===")
         lines.append("Lessons unavailable this run — still avoid revenge trades after losses.")
 
-    # Claude Skills Pack (5 screeners + TA/Nifty/VIX/trade plan) — BEFORE any agent signal.
-    lines.append("")
-    try:
-        from tradingagents.agents.utils.claude_skills_pack import build_claude_skills_context
-
-        lines.append(build_claude_skills_context(ticker))
-    except Exception as exc:
-        logger.warning("claude skills pack failed for %s: %s", ticker, exc)
-        lines.append("=== CLAUDE SKILLS PACK (observe BEFORE any Buy/Sell/Hold signal) ===")
-        lines.append(f"Skills pack unavailable: {exc}")
-        lines.append("Default to HOLD unless other evidence is overwhelming.")
-        lines.append("=== END CLAUDE SKILLS PACK ===")
-
     lines.append("")
     lines.append("=== MANDATORY TRADING RULES AND STRATEGY CONTEXT ===")
     lines.append(f"- Maximum {_fmt_inr(MAX_POSITION_INR)} invested per stock; keep at least {_fmt_inr(MIN_WALLET_CASH_RESERVE_INR)} cash.")
@@ -637,7 +624,7 @@ def build_analysis_context(
         f"- Aim to harvest the best risk-adjusted exit within {SWING_EXIT_WINDOW_DAYS} calendar days; "
         "this is not a forced sell date and not a minimum hold."
     )
-    lines.append("- Before SELL, review all holdings, wallet cash, live trades, backtests, Claude Skills Pack consensus, and past AI stance consistency.")
+    lines.append("- Before SELL, review all holdings, wallet cash, live trades, backtests, and past AI stance consistency.")
     lines.append("- After a realized loss on this ticker, cool off before re-buying (executor enforces cooldown).")
     return "\n".join(lines)
 
