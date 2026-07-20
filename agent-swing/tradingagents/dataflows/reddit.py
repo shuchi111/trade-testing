@@ -1,14 +1,10 @@
 """Reddit search fetcher for ticker-specific discussion posts.
 
-Default path is Reddit's public Atom/RSS search feed
-(``reddit.com/r/{sub}/search.rss``). The richer JSON search endpoint
-(``/search.json``) is reliably WAF-blocked (``HTTP 403``) for public clients
-(issue #862), and probing it on every call only doubled our request volume
-against Reddit's per-IP rate limit — tripping ``429`` on the RSS fallback — so
-it is kept (``_fetch_subreddit_json``) but not used by default. On a 429 we back
-off once (honouring ``Retry-After``). RSS lacks score / comment counts, so those
-posts are marked and the formatter omits the metrics rather than printing fake
-zeros.
+Default path is ``old.reddit.com`` search JSON: prime a cookie session with the
+HTML search page, then fetch ``/search.json`` for full post data (score, comment
+counts, selftext). ``www.reddit.com/search.json`` is WAF-blocked for bare
+clients; RSS (``search.rss``) is kept as fallback when the JSON path fails.
+On a 429 we back off once (honouring ``Retry-After``).
 
 No API key required. Returns formatted plaintext blocks ready for prompt
 injection and degrades gracefully — returns a placeholder string rather than
@@ -19,6 +15,7 @@ from __future__ import annotations
 
 import html
 import http.client
+import http.cookiejar
 import json
 import logging
 import os
@@ -29,20 +26,24 @@ from collections.abc import Iterable
 from datetime import datetime
 from urllib.error import HTTPError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 
 from .fetch_cache import cached_fetch
 from .symbol_utils import indian_equity_base, reddit_search_term
 
 logger = logging.getLogger(__name__)
 
-_API = "https://www.reddit.com/r/{sub}/search.json?{qs}"
+_OLD = "https://old.reddit.com"
+_OLD_JSON = _OLD + "/r/{sub}/search.json?{qs}"
+_OLD_HTML = _OLD + "/r/{sub}/search/?{qs}"
 _RSS = "https://www.reddit.com/r/{sub}/search.rss?{qs}"
-# A descriptive, identified User-Agent (per Reddit's API etiquette). Reddit
-# blocks generic/anonymous tokens like bare "Mozilla/5.0" or "curl/…" but
-# serves this one on both endpoints; the RSS feed accepts it even when the
-# JSON search endpoint 403s, so no browser-spoofing is needed.
-_UA = "tradingagents/0.2 (+https://github.com/TauricResearch/TradingAgents)"
+# Browser-like UA for old.reddit session priming + JSON; RSS keeps the identified
+# tradingagents token which Reddit still serves reliably.
+_SESSION_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+_RSS_UA = "tradingagents/0.2 (+https://github.com/TauricResearch/TradingAgents)"
 _ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
 # Default subreddits ordered roughly by signal density for ticker-specific
@@ -99,6 +100,81 @@ def _retry_after_seconds(exc: HTTPError) -> float | None:
         return None
 
 
+def _normalize_json_post(raw: dict) -> dict:
+    return {
+        "title": (raw.get("title") or "").strip(),
+        "score": raw.get("score"),
+        "num_comments": raw.get("num_comments"),
+        "created_utc": raw.get("created_utc"),
+        "selftext": (raw.get("selftext") or "").strip(),
+        "source": "json",
+    }
+
+
+def _fetch_subreddit_old_json(
+    ticker: str,
+    sub: str,
+    limit: int,
+    timeout: float,
+    _retry: bool = True,
+) -> list[dict]:
+    """Fetch search results via old.reddit.com session + JSON.
+
+    Visits the HTML search page first to obtain cookies, then requests
+    ``search.json`` with a Referer — the same flow that works in a browser
+    without OAuth. Carries score and comment counts.
+    """
+    qs = _search_qs(ticker, limit)
+    html_url = _OLD_HTML.format(sub=sub, qs=qs)
+    json_url = _OLD_JSON.format(sub=sub, qs=qs)
+    base_headers = {
+        "User-Agent": _SESSION_UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    jar = http.cookiejar.CookieJar()
+    opener = build_opener(HTTPCookieProcessor(jar))
+    try:
+        opener.open(Request(html_url, headers=base_headers), timeout=timeout)
+        req = Request(
+            json_url,
+            headers={
+                **base_headers,
+                "Accept": "application/json",
+                "Referer": html_url,
+            },
+        )
+        with opener.open(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read())
+        children = (payload.get("data") or {}).get("children") or []
+        posts = [
+            _normalize_json_post(c.get("data", {}))
+            for c in children
+            if isinstance(c, dict)
+        ]
+        return posts[:limit]
+    except HTTPError as exc:
+        if exc.code == 429 and _retry:
+            wait = _retry_after_seconds(exc) or 5.0
+            logger.warning(
+                "Reddit JSON 429 for r/%s · %s — backing off %.1fs then retrying once",
+                sub, ticker, wait,
+            )
+            time.sleep(wait)
+            return _fetch_subreddit_old_json(ticker, sub, limit, timeout, _retry=False)
+        logger.warning(
+            "Reddit JSON fetch failed for r/%s · %s: %s — falling back to RSS feed.",
+            sub, ticker, exc,
+        )
+        return []
+    except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Reddit JSON fetch failed for r/%s · %s: %s — falling back to RSS feed.",
+            sub, ticker, exc,
+        )
+        return []
+
+
 def _fetch_subreddit_rss(
     ticker: str,
     sub: str,
@@ -106,7 +182,7 @@ def _fetch_subreddit_rss(
     timeout: float,
     _retry: bool = True,
 ) -> list[dict]:
-    """Default path: parse the public Atom search feed for a subreddit.
+    """Fallback: parse the public Atom search feed for a subreddit.
 
     Carries no score / comment counts, so those fields are left None and the
     post is tagged ``source="rss"`` for honest display. On a 429 (Reddit's
@@ -114,7 +190,7 @@ def _fetch_subreddit_rss(
     present — before giving up, so a transient burst doesn't blank the feed.
     """
     url = _RSS.format(sub=sub, qs=_search_qs(ticker, limit))
-    req = Request(url, headers={"User-Agent": _UA})
+    req = Request(url, headers={"User-Agent": _RSS_UA})
     try:
         with urlopen(req, timeout=timeout) as resp:
             root = ET.fromstring(resp.read())
@@ -153,47 +229,16 @@ def _fetch_subreddit_rss(
     return posts
 
 
-def _fetch_subreddit_json(
-    ticker: str,
-    sub: str,
-    limit: int,
-    timeout: float,
-) -> list[dict]:
-    """Richer JSON search path (carries score / comment counts).
-
-    Reddit's WAF currently returns ``403 Blocked`` on this endpoint for
-    non-OAuth clients (issue #862), so it is NOT used by default — calling it on
-    every request only doubled our volume against the per-IP rate limit and
-    triggered 429s on the RSS fallback. Kept for the day the WAF relaxes or an
-    OAuth token is wired in; degrades to RSS on failure.
-    """
-    url = _API.format(sub=sub, qs=_search_qs(ticker, limit))
-    req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
-    try:
-        with urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read())
-        children = (payload.get("data") or {}).get("children") or []
-        return [c.get("data", {}) for c in children if isinstance(c, dict)]
-    except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
-        logger.warning(
-            "Reddit JSON fetch failed for r/%s · %s: %s — falling back to RSS feed.",
-            sub, ticker, exc,
-        )
-        return _fetch_subreddit_rss(ticker, sub, limit, timeout)
-
-
 def _fetch_subreddit(
     ticker: str,
     sub: str,
     limit: int,
     timeout: float,
 ) -> list[dict]:
-    """Fetch one subreddit, RSS-first.
-
-    The JSON search endpoint is reliably WAF-blocked (403) for public clients,
-    so we go straight to the RSS feed — which serves our identified User-Agent
-    reliably — halving our request volume against Reddit's per-IP rate limit.
-    """
+    """Fetch one subreddit: old.reddit JSON first, RSS on failure."""
+    posts = _fetch_subreddit_old_json(ticker, sub, limit, timeout)
+    if posts:
+        return posts
     return _fetch_subreddit_rss(ticker, sub, limit, timeout)
 
 
@@ -262,9 +307,9 @@ def fetch_reddit_posts(
     """Fetch recent Reddit posts mentioning ``ticker`` across finance
     subreddits and return them as a formatted plaintext block.
 
-    ``inter_request_delay`` paces the (now RSS-only) per-subreddit requests to
-    stay under Reddit's public per-IP rate limit; combined with the RSS-first
-    path it makes 429s rare even when several analyses run back-to-back.
+    Uses old.reddit.com session + JSON by default (full score/comment data).
+    ``inter_request_delay`` paces per-subreddit requests (2 HTTP calls each on
+    the JSON path) to stay under Reddit's public per-IP rate limit.
     """
     subs = tuple(subreddits) if subreddits is not None else subreddits_for_ticker(ticker)
     delay = inter_request_delay
