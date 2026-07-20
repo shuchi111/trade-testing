@@ -79,6 +79,30 @@ def _resolve_yahoo(ticker: str) -> str:
     return symbol
 
 
+def _to_naive_timestamp(value: Any) -> pd.Timestamp:
+    """Normalize any date-like value to a tz-naive ns Timestamp for safe compares."""
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert("UTC").tz_localize(None)
+    try:
+        ts = ts.as_unit("ns")
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return ts
+
+
+def _normalize_datetime_index(idx: Any) -> pd.DatetimeIndex:
+    """Force DatetimeIndex to tz-naive ns so Timestamp comparisons never blow up."""
+    out = pd.DatetimeIndex(pd.to_datetime(idx))
+    if out.tz is not None:
+        out = out.tz_convert("UTC").tz_localize(None)
+    try:
+        out = out.as_unit("ns")
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return out
+
+
 def load_ohlcv(ticker: str, period: str = "1y") -> pd.DataFrame:
     """Fetch daily OHLCV; raises ValueError when history is unusable."""
     symbol = _resolve_yahoo(ticker)
@@ -92,7 +116,9 @@ def load_ohlcv(ticker: str, period: str = "1y") -> pd.DataFrame:
         raise ValueError(f"Incomplete OHLCV columns for {symbol}")
     if "Volume" not in out.columns:
         out["Volume"] = 0.0
-    return out.dropna(subset=["Close"])
+    out = out.dropna(subset=["Close"])
+    out.index = _normalize_datetime_index(out.index)
+    return out
 
 
 def _sma(series: pd.Series, window: int) -> pd.Series:
@@ -190,11 +216,7 @@ def _daily_to_weekly(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
     work = df.copy()
-    if not isinstance(work.index, pd.DatetimeIndex):
-        work.index = pd.to_datetime(work.index)
-    # Normalize timezone-aware indexes so week grouping is stable.
-    if getattr(work.index, "tz", None) is not None:
-        work.index = work.index.tz_localize(None)
+    work.index = _normalize_datetime_index(work.index)
     weekly = work.resample("W-MON", label="left", closed="left").agg(
         {
             "Open": "first",
@@ -204,13 +226,28 @@ def _daily_to_weekly(df: pd.DataFrame) -> pd.DataFrame:
             "Volume": "sum",
         }
     ).dropna(subset=["Close"])
+    weekly.index = _normalize_datetime_index(weekly.index)
     return weekly
 
 
 def _find_recent_earnings_date(ticker: str, lookback_days: int = 60) -> datetime | None:
-    """Best-effort earnings date from yfinance (calendar or earnings history)."""
+    """Best-effort *past* earnings date from yfinance (history first, then calendar)."""
     symbol = _resolve_yahoo(ticker)
-    cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+    now = datetime.utcnow()
+    cutoff = now - timedelta(days=lookback_days)
+    upper = now + timedelta(days=1)
+
+    try:
+        dates = yf.Ticker(symbol).earnings_dates
+        if dates is not None and not dates.empty:
+            idx = pd.to_datetime(dates.index)
+            for ts in sorted(idx, reverse=True):
+                dt = _to_naive_timestamp(ts).to_pydatetime()
+                if cutoff <= dt <= upper:
+                    return dt
+    except Exception as exc:
+        logger.debug("earnings_dates unavailable for %s: %s", symbol, exc)
+
     try:
         cal = yf.Ticker(symbol).calendar
         if isinstance(cal, dict):
@@ -218,30 +255,20 @@ def _find_recent_earnings_date(ticker: str, lookback_days: int = 60) -> datetime
             if isinstance(raw, (list, tuple)) and raw:
                 raw = raw[0]
             if raw is not None:
-                dt = pd.Timestamp(raw).to_pydatetime().replace(tzinfo=None)
-                if dt >= cutoff - timedelta(days=7):
+                dt = _to_naive_timestamp(raw).to_pydatetime()
+                # Calendar often returns the *next* print — ignore future dates.
+                if cutoff - timedelta(days=7) <= dt <= upper:
                     return dt
         elif isinstance(cal, pd.DataFrame) and not cal.empty:
             for col in cal.columns:
                 if "earn" in str(col).lower():
                     val = cal[col].iloc[0]
-                    dt = pd.Timestamp(val).to_pydatetime().replace(tzinfo=None)
-                    if dt >= cutoff - timedelta(days=7):
+                    dt = _to_naive_timestamp(val).to_pydatetime()
+                    if cutoff - timedelta(days=7) <= dt <= upper:
                         return dt
                     break
     except Exception as exc:
         logger.debug("earnings calendar unavailable for %s: %s", symbol, exc)
-
-    try:
-        dates = yf.Ticker(symbol).earnings_dates
-        if dates is not None and not dates.empty:
-            idx = pd.to_datetime(dates.index)
-            for ts in sorted(idx, reverse=True):
-                dt = pd.Timestamp(ts).to_pydatetime().replace(tzinfo=None)
-                if cutoff <= dt <= datetime.utcnow() + timedelta(days=1):
-                    return dt
-    except Exception as exc:
-        logger.debug("earnings_dates unavailable for %s: %s", symbol, exc)
     return None
 
 
@@ -287,6 +314,9 @@ def screen_pead(
     if len(df) < 30:
         return ScreenerResult(name, 0, "unavailable", "Need 30+ sessions for PEAD", ["insufficient data"])
 
+    df = df.copy()
+    df.index = _normalize_datetime_index(df.index)
+
     earn_dt = earnings_date
     if earn_dt is None and ticker:
         earn_dt = _find_recent_earnings_date(ticker, lookback_days=watch_weeks * 7 + 14)
@@ -294,11 +324,7 @@ def screen_pead(
     gap_event = None
     if earn_dt is not None:
         # Locate first session on/after earnings and measure gap vs prior close.
-        idx = df.index
-        if getattr(idx, "tz", None) is not None:
-            earn_cmp = pd.Timestamp(earn_dt).tz_localize(idx.tz)
-        else:
-            earn_cmp = pd.Timestamp(earn_dt)
+        earn_cmp = _to_naive_timestamp(earn_dt)
         post = df[df.index >= earn_cmp]
         if len(post) >= 1:
             loc = df.index.get_indexer([post.index[0]], method="pad")[0]
@@ -334,9 +360,7 @@ def screen_pead(
         )
 
     weekly = _daily_to_weekly(df)
-    gap_ts = pd.Timestamp(gap_event["date"])
-    if getattr(weekly.index, "tz", None) is not None and gap_ts.tzinfo is None:
-        gap_ts = gap_ts.tz_localize(weekly.index.tz)
+    gap_ts = _to_naive_timestamp(gap_event["date"])
     post_weeks = weekly[weekly.index >= (gap_ts - timedelta(days=7))].tail(watch_weeks + 1)
     latest_close = float(df["Close"].iloc[-1])
 
@@ -357,7 +381,11 @@ def screen_pead(
         stage = "BREAKOUT" if broke else "SIGNAL_READY"
 
     # Expire if too far past the gap without actionable structure.
-    sessions_since = int((df.index[-1] - pd.Timestamp(gap_event["date"])).days) if len(df) else 99
+    sessions_since = (
+        int((_to_naive_timestamp(df.index[-1]) - _to_naive_timestamp(gap_event["date"])).days)
+        if len(df)
+        else 99
+    )
     if sessions_since > watch_weeks * 7 and stage == "MONITORING":
         stage = "EXPIRED"
 

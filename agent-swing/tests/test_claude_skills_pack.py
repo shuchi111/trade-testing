@@ -85,6 +85,15 @@ class TestScreeners:
         assert result.signal != "unavailable"
         assert any("gap" in f.lower() or "stage=" in f for f in result.facts)
 
+    def test_pead_handles_tz_aware_index(self):
+        """yfinance NSE bars are tz-aware; weekly resample drops tz — must still compare."""
+        stock = _synthetic_uptrend()
+        stock.index = stock.index.tz_localize("Asia/Kolkata")
+        result = csp.screen_pead(stock)
+        assert result.name == "PEAD"
+        assert result.signal != "unavailable"
+        assert "Invalid comparison" not in (result.summary or "")
+
     def test_connect_links_screeners_and_builds_trade_plan(self):
         stock = _synthetic_uptrend()
         nifty = _synthetic_nifty()
