@@ -107,9 +107,17 @@ class ExecuteTradeSellPathTests(unittest.TestCase):
                 conn, ticker="TCS.NS", action="SELL", quantity=10.0, price=150.0
             )
 
-        manual_sell.assert_called_once_with(conn, ticker="TCS.NS", quantity=10.0, price=150.0)
+        manual_sell.assert_called_once_with(
+            conn,
+            ticker="TCS.NS",
+            quantity=10.0,
+            price=150.0,
+            wallet_id=portfolio_db.ADMIN_WALLET_ID,
+        )
         deduct_charge.assert_called_once()
-        adjust_pnl.assert_called_once_with(conn, "TCS.NS", sell_charge)
+        adjust_pnl.assert_called_once_with(
+            conn, "TCS.NS", sell_charge, wallet_id=portfolio_db.ADMIN_WALLET_ID
+        )
         self.assertEqual(net, gross_pnl - sell_charge)
         conn.commit.assert_called_once()
 

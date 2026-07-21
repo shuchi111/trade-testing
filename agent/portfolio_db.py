@@ -5,6 +5,11 @@ import logging
 from datetime import date, datetime
 from typing import Any
 
+from trading_constraints import (
+    min_wallet_cash_reserve_inr,
+    transaction_charge_for_action,
+)
+
 logger = logging.getLogger(__name__)
 
 ADMIN_WALLET_ID = "00000000-0000-0000-0000-000000000001"
@@ -13,6 +18,8 @@ MAX_POSITION_INR = 25_000.0
 MIN_WALLET_CASH_RESERVE_INR = 5_000.0
 SWING_EXIT_WINDOW_DAYS = 90
 TRAILING_STOP_LOSS_PCT = 5.0
+# Fractional-share float noise: treat remainder at or below this as a full exit.
+QUANTITY_EPSILON = 1e-6
 
 
 def load_holding(conn, ticker: str, wallet_id: str = ADMIN_WALLET_ID) -> tuple[float, float]:
@@ -629,6 +636,189 @@ def build_analysis_context(
     return "\n".join(lines)
 
 
+def _deduct_transaction_charge(
+    conn, *, ticker: str, action: str, wallet_id: str = ADMIN_WALLET_ID
+) -> float:
+    """Withdraw flat transaction charge from wallet (ledger type WITHDRAWAL)."""
+    charge = transaction_charge_for_action(action)
+    if charge <= 0:
+        return 0.0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE wallet_accounts
+               SET current_cash = current_cash - %s, updated_at = now()
+             WHERE id = %s
+            RETURNING current_cash
+            """,
+            (charge, wallet_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Wallet not found: {wallet_id}")
+        cash_after = float(row[0])
+        cur.execute(
+            """
+            INSERT INTO wallet_transactions (wallet_id, type, amount, balance_after, note)
+            VALUES (%s, 'WITHDRAWAL', %s, %s, %s)
+            """,
+            (
+                wallet_id,
+                charge,
+                cash_after,
+                f"txn_charge {action} {ticker.upper()}",
+            ),
+        )
+    return charge
+
+
+def _adjust_latest_sell_pnl(
+    conn, ticker: str, charge: float, wallet_id: str = ADMIN_WALLET_ID
+) -> float | None:
+    """Subtract sell-leg charge from the most recent SELL row (net realized PnL)."""
+    if charge <= 0:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT realized_pnl FROM portfolio_trades
+                WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s) AND action = 'SELL'
+                ORDER BY trade_time DESC LIMIT 1
+                """,
+                (wallet_id, ticker),
+            )
+            row = cur.fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE portfolio_trades
+               SET realized_pnl = realized_pnl - %s
+             WHERE id = (
+               SELECT id FROM portfolio_trades
+               WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s) AND action = 'SELL'
+               ORDER BY trade_time DESC LIMIT 1
+             )
+            RETURNING realized_pnl
+            """,
+            (charge, wallet_id, ticker),
+        )
+        row = cur.fetchone()
+    return float(row[0]) if row and row[0] is not None else None
+
+
+def _is_holding_quantity_check_violation(exc: BaseException) -> bool:
+    """Return True when a SELL failed because holdings quantity would go negative."""
+    try:
+        from psycopg2.errors import CheckViolation
+    except ImportError:
+        CheckViolation = ()  # type: ignore[misc, assignment]
+
+    if isinstance(exc, CheckViolation):
+        return True
+
+    message = str(exc).lower()
+    return (
+        "portfolio_holdings_quantity_check" in message
+        or "violates check constraint" in message
+    )
+
+
+def _execute_sell_without_zero_holding_update(
+    conn,
+    *,
+    ticker: str,
+    quantity: float,
+    price: float,
+    wallet_id: str = ADMIN_WALLET_ID,
+) -> None:
+    """Full/near-full SELL without writing quantity=0 (avoids check constraint)."""
+    total = quantity * price
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT avg_entry, quantity
+            FROM portfolio_holdings
+            WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s)
+            FOR UPDATE
+            """,
+            (wallet_id, ticker),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"No open position to sell for {ticker}")
+
+        avg_entry = float(row[0] or 0)
+        held_qty = float(row[1] or 0)
+        if quantity > held_qty:
+            raise ValueError(
+                f"Cannot sell {quantity:g} {ticker}; current holding is {held_qty:g}"
+            )
+
+        remaining_qty = held_qty - quantity
+        realized = (price - avg_entry) * quantity
+        cur.execute(
+            """
+            UPDATE wallet_accounts
+               SET current_cash = current_cash + %s, updated_at = now()
+             WHERE id = %s
+            RETURNING current_cash
+            """,
+            (total, wallet_id),
+        )
+        cash_row = cur.fetchone()
+        if not cash_row:
+            raise ValueError(f"Wallet not found: {wallet_id}")
+
+        if remaining_qty <= 0:
+            cur.execute(
+                "DELETE FROM portfolio_holdings WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s)",
+                (wallet_id, ticker),
+            )
+            cur.execute(
+                """
+                UPDATE portfolio_trailing_stops
+                   SET status = 'CANCELLED', closed_at = now(), updated_at = now()
+                 WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s) AND status = 'ACTIVE'
+                """,
+                (wallet_id, ticker),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE portfolio_holdings
+                   SET quantity = %s, updated_at = now()
+                 WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s)
+                """,
+                (remaining_qty, wallet_id, ticker),
+            )
+            cur.execute(
+                """
+                UPDATE portfolio_trailing_stops
+                   SET quantity = %s, updated_at = now()
+                 WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s) AND status = 'ACTIVE'
+                """,
+                (remaining_qty, wallet_id, ticker),
+            )
+
+        cur.execute(
+            """
+            INSERT INTO portfolio_trades (
+              wallet_id, ticker, action, quantity, price, total_value, realized_pnl
+            )
+            VALUES (%s, %s, 'SELL', %s, %s, %s, %s)
+            """,
+            (wallet_id, ticker, quantity, price, total, realized),
+        )
+        cur.execute(
+            """
+            INSERT INTO wallet_transactions (wallet_id, type, amount, balance_after, note)
+            VALUES (%s, 'SELL', %s, %s, %s)
+            """,
+            (wallet_id, total, cash_row[0], ticker),
+        )
+
+
 def execute_trade(
     conn,
     *,
@@ -637,10 +827,66 @@ def execute_trade(
     quantity: float,
     price: float,
     wallet_id: str = ADMIN_WALLET_ID,
-) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT execute_wallet_trade(%s::uuid, %s, %s, %s, %s)",
-            (wallet_id, ticker.upper(), action, quantity, price),
+) -> float | None:
+    """Execute paper trade, then deduct per-leg txn charge and net SELL PnL.
+
+    Returns
+    -------
+    float | None
+        Net realized PnL for ``SELL`` (after sell charge), otherwise ``None``.
+    """
+    ticker = ticker.upper()
+    charge = transaction_charge_for_action(action)
+    use_manual_sell = False
+    if action == "BUY":
+        cash = load_wallet_cash(conn, wallet_id=wallet_id)
+        cost = quantity * price
+        total = cost + charge
+        min_cash = min_wallet_cash_reserve_inr()
+        if total > max(0.0, cash - min_cash):
+            raise ValueError(
+                f"Insufficient cash: need {_fmt_inr(total)} "
+                f"(trade {_fmt_inr(cost)} + charge {_fmt_inr(charge)}), "
+                f"have {_fmt_inr(cash)} and must keep {_fmt_inr(min_cash)}"
+            )
+    elif action == "SELL":
+        held_qty, _ = load_holding(conn, ticker, wallet_id=wallet_id)
+        if held_qty <= 0:
+            raise ValueError(f"No open position to sell for {ticker}")
+        if quantity > held_qty:
+            raise ValueError(
+                f"Cannot sell {quantity:g} {ticker}; current holding is {held_qty:g}"
+            )
+        use_manual_sell = (held_qty - quantity) <= QUANTITY_EPSILON
+    if use_manual_sell:
+        _execute_sell_without_zero_holding_update(
+            conn, ticker=ticker, quantity=quantity, price=price, wallet_id=wallet_id
         )
+    else:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT execute_wallet_trade(%s::uuid, %s, %s, %s, %s)",
+                    (wallet_id, ticker, action, quantity, price),
+                )
+        except Exception as exc:
+            if action == "SELL" and _is_holding_quantity_check_violation(exc):
+                conn.rollback()
+                _execute_sell_without_zero_holding_update(
+                    conn,
+                    ticker=ticker,
+                    quantity=quantity,
+                    price=price,
+                    wallet_id=wallet_id,
+                )
+            else:
+                raise
+    net_pnl: float | None = None
+    if charge > 0:
+        _deduct_transaction_charge(
+            conn, ticker=ticker, action=action, wallet_id=wallet_id
+        )
+    if action == "SELL":
+        net_pnl = _adjust_latest_sell_pnl(conn, ticker, charge, wallet_id=wallet_id)
     conn.commit()
+    return net_pnl
