@@ -92,6 +92,9 @@ jobs:
       PROPAGATE_RETRY_MAX_DELAY_SEC: "300"
       LLM_PREFLIGHT_MAX_ATTEMPTS: "10"
       LLM_PREFLIGHT_STRICT: "0"
+      REDDIT_FETCH_MODE: "json"
+      REDDIT_INTER_REQUEST_DELAY_SEC: "5"
+      REDDIT_RSS_FALLBACK: "0"
     steps:
       - checkout
       - export-pipeline-env
