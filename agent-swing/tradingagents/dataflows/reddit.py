@@ -2,11 +2,12 @@
 
 Default path is ``old.reddit.com`` search JSON: prime a shared cookie session,
 then fetch ``/search.json`` for full post data (score, comment counts, selftext).
-RSS (``search.rss``) is only used as fallback for transient failures — **not**
-after WAF ``403`` blocks, which are common from datacenter/CI IPs and would
-only double request volume and trigger ``429`` rate limits.
 
-Set ``REDDIT_FETCH_MODE=rss`` in GitHub Actions when JSON is consistently blocked.
+Set ``REDDIT_HTTP_PROXY`` / ``REDDIT_HTTPS_PROXY`` (or standard ``HTTPS_PROXY``)
+to route requests through a proxy — required on GitHub Actions / datacenter IPs
+that get WAF ``403`` on bare JSON. RSS remains a fallback for transient errors
+only (not after WAF blocks, which would double request volume and trip ``429``).
+
 On a ``429`` we back off once (honouring ``Retry-After``).
 
 No API key required. Returns formatted plaintext blocks ready for prompt
@@ -30,8 +31,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 from urllib.error import HTTPError
-from urllib.parse import urlencode
-from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
+from urllib.parse import urlencode, urlparse
+from urllib.request import (
+    HTTPCookieProcessor,
+    ProxyHandler,
+    Request,
+    build_opener,
+)
 
 from .fetch_cache import cached_fetch
 from .symbol_utils import indian_equity_base, reddit_search_term
@@ -76,6 +82,55 @@ def _rss_fallback_enabled() -> bool:
     return os.getenv("REDDIT_RSS_FALLBACK", "1").strip().lower() not in {
         "0", "false", "no", "off",
     }
+
+
+def _proxy_url() -> str | None:
+    """Return the configured HTTP(S) proxy URL, if any.
+
+    Prefer Reddit-specific vars so other outbound traffic is unaffected:
+    ``REDDIT_HTTPS_PROXY`` / ``REDDIT_HTTP_PROXY``, then standard
+    ``HTTPS_PROXY`` / ``HTTP_PROXY``.
+    """
+    for key in (
+        "REDDIT_HTTPS_PROXY",
+        "REDDIT_HTTP_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "https_proxy",
+        "http_proxy",
+    ):
+        val = (os.getenv(key) or "").strip()
+        if val:
+            return val
+    return None
+
+
+def _proxy_dict() -> dict[str, str]:
+    proxy = _proxy_url()
+    if not proxy:
+        return {}
+    return {"http": proxy, "https": proxy}
+
+
+def _proxy_label(proxy: str | None = None) -> str:
+    """Host:port only — never log credentials."""
+    raw = proxy if proxy is not None else _proxy_url()
+    if not raw:
+        return "direct"
+    try:
+        parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+        host = parsed.hostname or "?"
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{host}{port}"
+    except Exception:
+        return "proxy"
+
+
+def _build_opener(*handlers):
+    proxy = _proxy_dict()
+    if proxy:
+        return build_opener(ProxyHandler(proxy), *handlers)
+    return build_opener(*handlers)
 
 
 def _search_qs(ticker: str, limit: int) -> str:
@@ -141,7 +196,10 @@ class _RedditSession:
     rate_limited: bool = False
 
     def __post_init__(self) -> None:
-        self._opener = build_opener(HTTPCookieProcessor(self.jar))
+        self._opener = _build_opener(HTTPCookieProcessor(self.jar))
+        proxy = _proxy_url()
+        if proxy:
+            logger.info("Reddit JSON via proxy %s", _proxy_label(proxy))
 
     def _base_headers(self) -> dict[str, str]:
         return {
@@ -217,10 +275,14 @@ class _RedditSession:
                 return [], "429"
             if exc.code == 403:
                 self.waf_blocked = True
+                proxy_hint = (
+                    "Check REDDIT_HTTP_PROXY."
+                    if not _proxy_url()
+                    else f"Proxy {_proxy_label()} still blocked — rotate exit IP."
+                )
                 logger.warning(
-                    "Reddit JSON WAF-blocked (403) for r/%s · %s — skipping RSS fallback "
-                    "to avoid rate-limit cascade. Set REDDIT_FETCH_MODE=rss in CI if persistent.",
-                    sub, ticker,
+                    "Reddit JSON WAF-blocked (403) for r/%s · %s — %s",
+                    sub, ticker, proxy_hint,
                 )
                 return [], "403"
             logger.warning(
@@ -243,8 +305,9 @@ def _fetch_subreddit_rss(
     """Fallback: parse the public Atom search feed for a subreddit."""
     url = _RSS.format(sub=sub, qs=_search_qs(ticker, limit))
     req = Request(url, headers={"User-Agent": _RSS_UA})
+    opener = _build_opener()
     try:
-        with urlopen(req, timeout=timeout) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             root = ET.fromstring(resp.read())
     except HTTPError as exc:
         if exc.code == 429 and _retry:
@@ -398,7 +461,7 @@ def _fetch_reddit_posts_uncached(
     if total_posts == 0 and session is not None and session.waf_blocked:
         return (
             f"<Reddit blocked requests from this IP for {search_term.upper()} — "
-            f"try REDDIT_FETCH_MODE=rss or Reddit OAuth. "
+            f"set REDDIT_HTTP_PROXY (or REDDIT_FETCH_MODE=rss). "
             f"Checked {', '.join(f'r/{s}' for s in subs)}>"
         )
 
@@ -421,7 +484,7 @@ def fetch_reddit_posts(
     subreddits and return them as a formatted plaintext block.
 
     Uses old.reddit.com session + JSON by default (full score/comment data).
-    ``REDDIT_FETCH_MODE=rss`` forces RSS-only (1 request/sub, better for CI IPs).
+    Route via ``REDDIT_HTTP_PROXY`` on CI. ``REDDIT_FETCH_MODE=rss`` forces RSS-only.
     ``inter_request_delay`` paces per-subreddit requests.
     """
     subs = tuple(subreddits) if subreddits is not None else subreddits_for_ticker(ticker)
@@ -429,7 +492,14 @@ def fetch_reddit_posts(
     if delay is None:
         delay = float(os.getenv("REDDIT_INTER_REQUEST_DELAY_SEC", "5.0"))
     return cached_fetch(
-        ("reddit", _fetch_mode(), reddit_search_term(ticker).upper(), subs, limit_per_sub),
+        (
+            "reddit",
+            _fetch_mode(),
+            _proxy_label(),
+            reddit_search_term(ticker).upper(),
+            subs,
+            limit_per_sub,
+        ),
         lambda: _fetch_reddit_posts_uncached(
             ticker,
             subs,
