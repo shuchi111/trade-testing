@@ -34,6 +34,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode, urlparse
 from urllib.request import (
     HTTPCookieProcessor,
+    OpenerDirector,
     ProxyHandler,
     Request,
     build_opener,
@@ -52,7 +53,8 @@ _RSS = "https://www.reddit.com/r/{sub}/search.rss?{qs}"
 # tradingagents token which Reddit still serves reliably.
 _SESSION_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
 )
 _RSS_UA = "tradingagents/0.2 (+https://github.com/TauricResearch/TradingAgents)"
 _ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
@@ -69,7 +71,25 @@ DEFAULT_SUBREDDITS = DEFAULT_SUBREDDITS_US
 
 
 def subreddits_for_ticker(ticker: str) -> tuple[str, ...]:
-    """Pick finance subreddits that match the instrument's primary market."""
+    """Pick finance subreddits that match the instrument's primary market.
+
+    Parameters
+    ----------
+    ticker : str
+        Raw symbol (e.g. ``AAPL``, ``TCS.NS``). Indian NSE/BSE suffixes route
+        to India-focused subreddits; all others use US defaults.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Subreddit names without the ``r/`` prefix, ordered by expected signal
+        density for ticker-specific discussion.
+
+    Raises
+    ------
+    None
+        Does not raise; unknown formats fall through to US subreddits.
+    """
     return DEFAULT_SUBREDDITS_IN if indian_equity_base(ticker) else DEFAULT_SUBREDDITS_US
 
 
@@ -126,7 +146,7 @@ def _proxy_label(proxy: str | None = None) -> str:
         return "proxy"
 
 
-def _build_opener(*handlers):
+def _build_opener(*handlers) -> OpenerDirector:
     proxy = _proxy_dict()
     if proxy:
         return build_opener(ProxyHandler(proxy), *handlers)
@@ -480,12 +500,36 @@ def fetch_reddit_posts(
     timeout: float = 10.0,
     inter_request_delay: float | None = None,
 ) -> str:
-    """Fetch recent Reddit posts mentioning ``ticker`` across finance
-    subreddits and return them as a formatted plaintext block.
+    """Fetch recent Reddit posts mentioning ``ticker`` across finance subreddits.
 
-    Uses old.reddit.com session + JSON by default (full score/comment data).
-    Route via ``REDDIT_HTTP_PROXY`` on CI. ``REDDIT_FETCH_MODE=rss`` forces RSS-only.
-    ``inter_request_delay`` paces per-subreddit requests.
+    Uses ``old.reddit.com`` session + JSON by default (full score/comment data).
+    Route via ``REDDIT_HTTP_PROXY`` on CI. ``REDDIT_FETCH_MODE=rss`` forces
+    RSS-only. ``inter_request_delay`` paces per-subreddit requests.
+
+    Parameters
+    ----------
+    ticker : str
+        Symbol to search for (normalized via ``reddit_search_term``).
+    subreddits : Iterable[str] | None, optional
+        Override default subreddit list. When ``None``, chosen by market.
+    limit_per_sub : int, optional
+        Max posts per subreddit in the past 7 days (default 5).
+    timeout : float, optional
+        HTTP timeout in seconds per request (default 10.0).
+    inter_request_delay : float | None, optional
+        Seconds between subreddit fetches. Defaults to
+        ``REDDIT_INTER_REQUEST_DELAY_SEC`` env var (5.0).
+
+    Returns
+    -------
+    str
+        Formatted plaintext block for prompt injection, or a placeholder when
+        no posts are found or Reddit blocks the IP.
+
+    Raises
+    ------
+    None
+        Never raises; failures degrade to placeholder strings.
     """
     subs = tuple(subreddits) if subreddits is not None else subreddits_for_ticker(ticker)
     delay = inter_request_delay
