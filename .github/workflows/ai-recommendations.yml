@@ -43,6 +43,10 @@ env:
   QUICK_THINK_LLM: glm-5.2
   ANTHROPIC_BASE_URL: https://api.z.ai/api/anthropic
   SELL_TRANSACTION_CHARGE_INR: '150'
+  # Full Reddit JSON via proxy (secret REDDIT_HTTP_PROXY). Without proxy, WAF 403s.
+  REDDIT_FETCH_MODE: json
+  REDDIT_INTER_REQUEST_DELAY_SEC: '5'
+  REDDIT_RSS_FALLBACK: '0'
 
 jobs:
   batch:
@@ -104,9 +108,17 @@ jobs:
           RECOMMENDATION_TICKERS: ${{ secrets.RECOMMENDATION_TICKERS }}
           DISPATCH_TICKER: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.ticker || '' }}
           DISPATCH_TRADE_DATE: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.trade_date || '' }}
+          REDDIT_HTTP_PROXY: ${{ secrets.REDDIT_HTTP_PROXY }}
+          REDDIT_HTTPS_PROXY: ${{ secrets.REDDIT_HTTPS_PROXY || secrets.REDDIT_HTTP_PROXY }}
         run: |
           set -uo pipefail
           source scripts/market-date.sh
+
+          if [ -z "${REDDIT_HTTP_PROXY:-}" ]; then
+            echo "::warning::REDDIT_HTTP_PROXY secret empty — Reddit JSON may get WAF 403 on Actions IPs. Add a residential/datacenter proxy secret for full scores/comments."
+          else
+            echo "Reddit fetch: JSON via proxy (REDDIT_HTTP_PROXY set)"
+          fi
 
           normalize_param() {
             case "${1:-}" in

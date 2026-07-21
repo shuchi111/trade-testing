@@ -1,14 +1,14 @@
 """Reddit search fetcher for ticker-specific discussion posts.
 
-Default path is Reddit's public Atom/RSS search feed
-(``reddit.com/r/{sub}/search.rss``). The richer JSON search endpoint
-(``/search.json``) is reliably WAF-blocked (``HTTP 403``) for public clients
-(issue #862), and probing it on every call only doubled our request volume
-against Reddit's per-IP rate limit — tripping ``429`` on the RSS fallback — so
-it is kept (``_fetch_subreddit_json``) but not used by default. On a 429 we back
-off once (honouring ``Retry-After``). RSS lacks score / comment counts, so those
-posts are marked and the formatter omits the metrics rather than printing fake
-zeros.
+Default path is ``old.reddit.com`` search JSON: prime a shared cookie session,
+then fetch ``/search.json`` for full post data (score, comment counts, selftext).
+
+Set ``REDDIT_HTTP_PROXY`` / ``REDDIT_HTTPS_PROXY`` (or standard ``HTTPS_PROXY``)
+to route requests through a proxy — required on GitHub Actions / datacenter IPs
+that get WAF ``403`` on bare JSON. RSS remains a fallback for transient errors
+only (not after WAF blocks, which would double request volume and trip ``429``).
+
+On a ``429`` we back off once (honouring ``Retry-After``).
 
 No API key required. Returns formatted plaintext blocks ready for prompt
 injection and degrades gracefully — returns a placeholder string rather than
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import html
 import http.client
+import http.cookiejar
 import json
 import logging
 import os
@@ -26,24 +27,40 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 from urllib.error import HTTPError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import urlencode, urlparse
+from urllib.request import (
+    HTTPCookieProcessor,
+    OpenerDirector,
+    ProxyHandler,
+    Request,
+    build_opener,
+)
 
 from .fetch_cache import cached_fetch
 from .symbol_utils import indian_equity_base, reddit_search_term
 
 logger = logging.getLogger(__name__)
 
-_API = "https://www.reddit.com/r/{sub}/search.json?{qs}"
+_OLD = "https://old.reddit.com"
+_OLD_JSON = _OLD + "/r/{sub}/search.json?{qs}"
+_OLD_HTML = _OLD + "/r/{sub}/search/?{qs}"
 _RSS = "https://www.reddit.com/r/{sub}/search.rss?{qs}"
-# A descriptive, identified User-Agent (per Reddit's API etiquette). Reddit
-# blocks generic/anonymous tokens like bare "Mozilla/5.0" or "curl/…" but
-# serves this one on both endpoints; the RSS feed accepts it even when the
-# JSON search endpoint 403s, so no browser-spoofing is needed.
-_UA = "tradingagents/0.2 (+https://github.com/TauricResearch/TradingAgents)"
+# Browser-like UA for old.reddit session priming + JSON; RSS keeps the identified
+# tradingagents token which Reddit still serves reliably.
+_SESSION_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+_RSS_UA = "tradingagents/0.2 (+https://github.com/TauricResearch/TradingAgents)"
 _ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
+
+FetchMode = Literal["json", "rss"]
+FetchError = Literal["403", "429", "other"]
 
 # Default subreddits ordered roughly by signal density for ticker-specific
 # discussion. wallstreetbets has the most volume but most noise; stocks /
@@ -54,8 +71,86 @@ DEFAULT_SUBREDDITS = DEFAULT_SUBREDDITS_US
 
 
 def subreddits_for_ticker(ticker: str) -> tuple[str, ...]:
-    """Pick finance subreddits that match the instrument's primary market."""
+    """Pick finance subreddits that match the instrument's primary market.
+
+    Parameters
+    ----------
+    ticker : str
+        Raw symbol (e.g. ``AAPL``, ``TCS.NS``). Indian NSE/BSE suffixes route
+        to India-focused subreddits; all others use US defaults.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Subreddit names without the ``r/`` prefix, ordered by expected signal
+        density for ticker-specific discussion.
+
+    Raises
+    ------
+    None
+        Does not raise; unknown formats fall through to US subreddits.
+    """
     return DEFAULT_SUBREDDITS_IN if indian_equity_base(ticker) else DEFAULT_SUBREDDITS_US
+
+
+def _fetch_mode() -> FetchMode:
+    mode = os.getenv("REDDIT_FETCH_MODE", "json").strip().lower()
+    return "rss" if mode == "rss" else "json"
+
+
+def _rss_fallback_enabled() -> bool:
+    return os.getenv("REDDIT_RSS_FALLBACK", "1").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+
+
+def _proxy_url() -> str | None:
+    """Return the configured HTTP(S) proxy URL, if any.
+
+    Prefer Reddit-specific vars so other outbound traffic is unaffected:
+    ``REDDIT_HTTPS_PROXY`` / ``REDDIT_HTTP_PROXY``, then standard
+    ``HTTPS_PROXY`` / ``HTTP_PROXY``.
+    """
+    for key in (
+        "REDDIT_HTTPS_PROXY",
+        "REDDIT_HTTP_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "https_proxy",
+        "http_proxy",
+    ):
+        val = (os.getenv(key) or "").strip()
+        if val:
+            return val
+    return None
+
+
+def _proxy_dict() -> dict[str, str]:
+    proxy = _proxy_url()
+    if not proxy:
+        return {}
+    return {"http": proxy, "https": proxy}
+
+
+def _proxy_label(proxy: str | None = None) -> str:
+    """Host:port only — never log credentials."""
+    raw = proxy if proxy is not None else _proxy_url()
+    if not raw:
+        return "direct"
+    try:
+        parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+        host = parsed.hostname or "?"
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{host}{port}"
+    except Exception:
+        return "proxy"
+
+
+def _build_opener(*handlers) -> OpenerDirector:
+    proxy = _proxy_dict()
+    if proxy:
+        return build_opener(ProxyHandler(proxy), *handlers)
+    return build_opener(*handlers)
 
 
 def _search_qs(ticker: str, limit: int) -> str:
@@ -99,6 +194,127 @@ def _retry_after_seconds(exc: HTTPError) -> float | None:
         return None
 
 
+def _normalize_json_post(raw: dict) -> dict:
+    return {
+        "title": (raw.get("title") or "").strip(),
+        "score": raw.get("score"),
+        "num_comments": raw.get("num_comments"),
+        "created_utc": raw.get("created_utc"),
+        "selftext": (raw.get("selftext") or "").strip(),
+        "source": "json",
+    }
+
+
+@dataclass
+class _RedditSession:
+    """Shared cookie session for one ticker fetch (reused across subreddits)."""
+
+    timeout: float
+    jar: http.cookiejar.CookieJar = field(default_factory=http.cookiejar.CookieJar)
+    primed: bool = False
+    waf_blocked: bool = False
+    rate_limited: bool = False
+
+    def __post_init__(self) -> None:
+        self._opener = _build_opener(HTTPCookieProcessor(self.jar))
+        proxy = _proxy_url()
+        if proxy:
+            logger.info("Reddit JSON via proxy %s", _proxy_label(proxy))
+
+    def _base_headers(self) -> dict[str, str]:
+        return {
+            "User-Agent": _SESSION_UA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "identity",
+            "DNT": "1",
+        }
+
+    def _open(self, req: Request) -> http.client.HTTPResponse:
+        return self._opener.open(req, timeout=self.timeout)
+
+    def prime(self) -> None:
+        if self.primed:
+            return
+        try:
+            self._open(Request(f"{_OLD}/", headers=self._base_headers()))
+            self.primed = True
+        except (OSError, http.client.HTTPException) as exc:
+            logger.debug("Reddit session prime failed (continuing): %s", exc)
+
+    def fetch_json(
+        self,
+        ticker: str,
+        sub: str,
+        limit: int,
+        *,
+        prime_html: bool = True,
+        _retry: bool = True,
+    ) -> tuple[list[dict], FetchError | None]:
+        if self.waf_blocked:
+            return [], "403"
+
+        self.prime()
+        qs = _search_qs(ticker, limit)
+        html_url = _OLD_HTML.format(sub=sub, qs=qs)
+        json_url = _OLD_JSON.format(sub=sub, qs=qs)
+        base_headers = self._base_headers()
+        try:
+            if prime_html:
+                self._open(Request(html_url, headers=base_headers))
+            req = Request(
+                json_url,
+                headers={
+                    **base_headers,
+                    "Accept": "application/json",
+                    "Referer": html_url,
+                },
+            )
+            with self._open(req) as resp:
+                payload = json.loads(resp.read())
+            children = (payload.get("data") or {}).get("children") or []
+            posts = [
+                _normalize_json_post(c.get("data", {}))
+                for c in children
+                if isinstance(c, dict)
+            ]
+            return posts[:limit], None
+        except HTTPError as exc:
+            if exc.code == 429:
+                self.rate_limited = True
+                if _retry:
+                    wait = _retry_after_seconds(exc) or 8.0
+                    logger.warning(
+                        "Reddit JSON 429 for r/%s · %s — backing off %.1fs then retrying once",
+                        sub, ticker, wait,
+                    )
+                    time.sleep(wait)
+                    return self.fetch_json(
+                        ticker, sub, limit, prime_html=prime_html, _retry=False,
+                    )
+                return [], "429"
+            if exc.code == 403:
+                self.waf_blocked = True
+                proxy_hint = (
+                    "Check REDDIT_HTTP_PROXY."
+                    if not _proxy_url()
+                    else f"Proxy {_proxy_label()} still blocked — rotate exit IP."
+                )
+                logger.warning(
+                    "Reddit JSON WAF-blocked (403) for r/%s · %s — %s",
+                    sub, ticker, proxy_hint,
+                )
+                return [], "403"
+            logger.warning(
+                "Reddit JSON fetch failed for r/%s · %s: HTTP %s",
+                sub, ticker, exc.code,
+            )
+            return [], "other"
+        except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
+            logger.warning("Reddit JSON fetch failed for r/%s · %s: %s", sub, ticker, exc)
+            return [], "other"
+
+
 def _fetch_subreddit_rss(
     ticker: str,
     sub: str,
@@ -106,21 +322,16 @@ def _fetch_subreddit_rss(
     timeout: float,
     _retry: bool = True,
 ) -> list[dict]:
-    """Default path: parse the public Atom search feed for a subreddit.
-
-    Carries no score / comment counts, so those fields are left None and the
-    post is tagged ``source="rss"`` for honest display. On a 429 (Reddit's
-    per-IP rate limit) we back off once — honouring ``Retry-After`` when
-    present — before giving up, so a transient burst doesn't blank the feed.
-    """
+    """Fallback: parse the public Atom search feed for a subreddit."""
     url = _RSS.format(sub=sub, qs=_search_qs(ticker, limit))
-    req = Request(url, headers={"User-Agent": _UA})
+    req = Request(url, headers={"User-Agent": _RSS_UA})
+    opener = _build_opener()
     try:
-        with urlopen(req, timeout=timeout) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             root = ET.fromstring(resp.read())
     except HTTPError as exc:
         if exc.code == 429 and _retry:
-            wait = _retry_after_seconds(exc) or 5.0
+            wait = _retry_after_seconds(exc) or 8.0
             logger.warning(
                 "Reddit RSS 429 for r/%s · %s — backing off %.1fs then retrying once",
                 sub, ticker, wait,
@@ -130,8 +341,6 @@ def _fetch_subreddit_rss(
         logger.warning("Reddit RSS fetch failed for r/%s · %s: %s", sub, ticker, exc)
         return []
     except (OSError, http.client.HTTPException, ET.ParseError) as exc:
-        # OSError covers URLError/TimeoutError/connection resets; HTTPException
-        # covers chunked-transfer errors (IncompleteRead/BadStatusLine, #1024).
         logger.warning("Reddit RSS fetch failed for r/%s · %s: %s", sub, ticker, exc)
         return []
 
@@ -154,47 +363,51 @@ def _fetch_subreddit_rss(
 
 
 def _fetch_subreddit_json(
+    session: _RedditSession,
     ticker: str,
     sub: str,
     limit: int,
     timeout: float,
+    *,
+    html_primed: bool = False,
 ) -> list[dict]:
-    """Richer JSON search path (carries score / comment counts).
+    """JSON path with shared session; RSS only on transient errors."""
+    posts, err = session.fetch_json(ticker, sub, limit, prime_html=not html_primed)
+    if posts or err is None:
+        return posts
 
-    Reddit's WAF currently returns ``403 Blocked`` on this endpoint for
-    non-OAuth clients (issue #862), so it is NOT used by default — calling it on
-    every request only doubled our volume against the per-IP rate limit and
-    triggered 429s on the RSS fallback. Kept for the day the WAF relaxes or an
-    OAuth token is wired in; degrades to RSS on failure.
-    """
-    url = _API.format(sub=sub, qs=_search_qs(ticker, limit))
-    req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
-    try:
-        with urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read())
-        children = (payload.get("data") or {}).get("children") or []
-        return [c.get("data", {}) for c in children if isinstance(c, dict)]
-    except (OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
-        logger.warning(
-            "Reddit JSON fetch failed for r/%s · %s: %s — falling back to RSS feed.",
-            sub, ticker, exc,
-        )
-        return _fetch_subreddit_rss(ticker, sub, limit, timeout)
+    if err == "403" or not _rss_fallback_enabled():
+        return []
+
+    if session.waf_blocked:
+        return []
+
+    # Transient failure — one RSS attempt after a pause (avoid hammering).
+    pause = 8.0 if err == "429" or session.rate_limited else 4.0
+    logger.info(
+        "Reddit JSON unavailable for r/%s · %s (%s) — trying RSS after %.0fs pause",
+        sub, ticker, err, pause,
+    )
+    time.sleep(pause)
+    return _fetch_subreddit_rss(ticker, sub, limit, timeout)
 
 
 def _fetch_subreddit(
+    session: _RedditSession | None,
     ticker: str,
     sub: str,
     limit: int,
     timeout: float,
+    *,
+    mode: FetchMode,
+    html_primed: bool = False,
 ) -> list[dict]:
-    """Fetch one subreddit, RSS-first.
-
-    The JSON search endpoint is reliably WAF-blocked (403) for public clients,
-    so we go straight to the RSS feed — which serves our identified User-Agent
-    reliably — halving our request volume against Reddit's per-IP rate limit.
-    """
-    return _fetch_subreddit_rss(ticker, sub, limit, timeout)
+    if mode == "rss":
+        return _fetch_subreddit_rss(ticker, sub, limit, timeout)
+    assert session is not None
+    return _fetch_subreddit_json(
+        session, ticker, sub, limit, timeout, html_primed=html_primed,
+    )
 
 
 def _fetch_reddit_posts_uncached(
@@ -202,17 +415,38 @@ def _fetch_reddit_posts_uncached(
     subreddits: Iterable[str],
     limit_per_sub: int = 5,
     timeout: float = 10.0,
-    inter_request_delay: float = 2.5,
+    inter_request_delay: float = 5.0,
 ) -> str:
     """Fetch recent Reddit posts mentioning ``search_term`` across subreddits."""
     search_term = reddit_search_term(ticker)
+    mode = _fetch_mode()
     blocks = []
     total_posts = 0
     subs = tuple(subreddits)
+    session = None if mode == "rss" else _RedditSession(timeout=timeout)
+    html_primed = False
+
     for i, sub in enumerate(subs):
         if i > 0:
             time.sleep(inter_request_delay)
-        posts = _fetch_subreddit(search_term, sub, limit_per_sub, timeout)
+        if session is not None and session.waf_blocked:
+            blocks.append(
+                f"r/{sub}: <Reddit blocked requests from this IP — data unavailable>"
+            )
+            continue
+
+        posts = _fetch_subreddit(
+            session,
+            search_term,
+            sub,
+            limit_per_sub,
+            timeout,
+            mode=mode,
+            html_primed=html_primed,
+        )
+        if session is not None and posts and not html_primed:
+            html_primed = True
+
         total_posts += len(posts)
         if not posts:
             blocks.append(
@@ -244,6 +478,13 @@ def _fetch_reddit_posts_uncached(
             )
         blocks.append("\n".join(lines))
 
+    if total_posts == 0 and session is not None and session.waf_blocked:
+        return (
+            f"<Reddit blocked requests from this IP for {search_term.upper()} — "
+            f"set REDDIT_HTTP_PROXY (or REDDIT_FETCH_MODE=rss). "
+            f"Checked {', '.join(f'r/{s}' for s in subs)}>"
+        )
+
     if total_posts == 0:
         return (
             f"<no Reddit posts found mentioning {search_term.upper()} across "
@@ -259,19 +500,50 @@ def fetch_reddit_posts(
     timeout: float = 10.0,
     inter_request_delay: float | None = None,
 ) -> str:
-    """Fetch recent Reddit posts mentioning ``ticker`` across finance
-    subreddits and return them as a formatted plaintext block.
+    """Fetch recent Reddit posts mentioning ``ticker`` across finance subreddits.
 
-    ``inter_request_delay`` paces the (now RSS-only) per-subreddit requests to
-    stay under Reddit's public per-IP rate limit; combined with the RSS-first
-    path it makes 429s rare even when several analyses run back-to-back.
+    Uses ``old.reddit.com`` session + JSON by default (full score/comment data).
+    Route via ``REDDIT_HTTP_PROXY`` on CI. ``REDDIT_FETCH_MODE=rss`` forces
+    RSS-only. ``inter_request_delay`` paces per-subreddit requests.
+
+    Parameters
+    ----------
+    ticker : str
+        Symbol to search for (normalized via ``reddit_search_term``).
+    subreddits : Iterable[str] | None, optional
+        Override default subreddit list. When ``None``, chosen by market.
+    limit_per_sub : int, optional
+        Max posts per subreddit in the past 7 days (default 5).
+    timeout : float, optional
+        HTTP timeout in seconds per request (default 10.0).
+    inter_request_delay : float | None, optional
+        Seconds between subreddit fetches. Defaults to
+        ``REDDIT_INTER_REQUEST_DELAY_SEC`` env var (5.0).
+
+    Returns
+    -------
+    str
+        Formatted plaintext block for prompt injection, or a placeholder when
+        no posts are found or Reddit blocks the IP.
+
+    Raises
+    ------
+    None
+        Never raises; failures degrade to placeholder strings.
     """
     subs = tuple(subreddits) if subreddits is not None else subreddits_for_ticker(ticker)
     delay = inter_request_delay
     if delay is None:
-        delay = float(os.getenv("REDDIT_INTER_REQUEST_DELAY_SEC", "2.5"))
+        delay = float(os.getenv("REDDIT_INTER_REQUEST_DELAY_SEC", "5.0"))
     return cached_fetch(
-        ("reddit", reddit_search_term(ticker).upper(), subs, limit_per_sub),
+        (
+            "reddit",
+            _fetch_mode(),
+            _proxy_label(),
+            reddit_search_term(ticker).upper(),
+            subs,
+            limit_per_sub,
+        ),
         lambda: _fetch_reddit_posts_uncached(
             ticker,
             subs,
