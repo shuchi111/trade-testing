@@ -140,7 +140,8 @@ def enforce_holdings_decision(
             ),
         )
 
-    if holding.is_holding and token == "BUY":
+    # "BUY" is a rating token, not a credential (Bandit B105 false positive).
+    if holding.is_holding and token == "BUY":  # nosec B105
         return (
             "HOLD",
             (
