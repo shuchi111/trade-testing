@@ -18,7 +18,9 @@ MAX_POSITION_INR = 25_000.0
 MIN_WALLET_CASH_RESERVE_INR = 5_000.0
 SWING_EXIT_WINDOW_DAYS = 90
 TRAILING_STOP_LOSS_PCT = 5.0
-# Fractional-share float noise: treat remainder at or below this as a full exit.
+# Treat remainder at or below this as a full exit so we DELETE the holding
+# instead of writing quantity≈0 (trips portfolio_holdings_quantity_check).
+# Needed for fractional crypto lots; 1e-6 is far below any whole-share NSE lot.
 QUANTITY_EPSILON = 1e-6
 
 
@@ -639,7 +641,36 @@ def build_analysis_context(
 def _deduct_transaction_charge(
     conn, *, ticker: str, action: str, wallet_id: str = ADMIN_WALLET_ID
 ) -> float:
-    """Withdraw flat transaction charge from wallet (ledger type WITHDRAWAL)."""
+    """Withdraw flat transaction charge from wallet (ledger type WITHDRAWAL).
+
+    Parameters
+    ----------
+    conn
+        Open psycopg2 connection. UPDATE + INSERT run in the caller's open
+        transaction; ``execute_trade`` commits after this returns. On failure
+        the caller must ``rollback()`` so cash and ledger stay consistent.
+    ticker
+        Instrument symbol included in the ledger ``note``.
+    action
+        Trade side (``BUY`` / ``SELL``); selects the charge via
+        ``transaction_charge_for_action``.
+    wallet_id
+        Target paper wallet UUID.
+
+    Returns
+    -------
+    float
+        Charge amount deducted (``0.0`` when the side charge is disabled).
+
+    Raises
+    ------
+    ValueError
+        If no ``wallet_accounts`` row exists for ``wallet_id``.
+
+    Examples
+    --------
+    >>> # charge = _deduct_transaction_charge(conn, ticker="INFY.NS", action="SELL")
+    """
     charge = transaction_charge_for_action(action)
     if charge <= 0:
         return 0.0
@@ -655,8 +686,13 @@ def _deduct_transaction_charge(
         )
         row = cur.fetchone()
         if not row:
-            raise ValueError(f"Wallet not found: {wallet_id}")
+            raise ValueError(f"Wallet account row missing for id={wallet_id}")
         cash_after = float(row[0])
+        note = (
+            f"Sell fee ₹{charge:,.0f} · {ticker.upper()}"
+            if action.upper() == "SELL"
+            else f"Buy fee ₹{charge:,.0f} · {ticker.upper()}"
+        )
         cur.execute(
             """
             INSERT INTO wallet_transactions (wallet_id, type, amount, balance_after, note)
@@ -666,7 +702,7 @@ def _deduct_transaction_charge(
                 wallet_id,
                 charge,
                 cash_after,
-                f"txn_charge {action} {ticker.upper()}",
+                note,
             ),
         )
     return charge
@@ -675,7 +711,32 @@ def _deduct_transaction_charge(
 def _adjust_latest_sell_pnl(
     conn, ticker: str, charge: float, wallet_id: str = ADMIN_WALLET_ID
 ) -> float | None:
-    """Subtract sell-leg charge from the most recent SELL row (net realized PnL)."""
+    """Subtract sell-leg charge from the most recent SELL row (net realized PnL).
+
+    Parameters
+    ----------
+    conn
+        Open psycopg2 connection in the same transaction as the preceding sell.
+    ticker
+        Instrument whose latest ``portfolio_trades`` SELL row is adjusted.
+    charge
+        INR to subtract from ``realized_pnl``. When ``0``, only reads PnL.
+    wallet_id
+        Paper wallet UUID.
+
+    Returns
+    -------
+    float | None
+        Net ``realized_pnl`` after adjustment, or ``None`` if no SELL row /
+        null PnL.
+
+    Notes
+    -----
+    Must run **after** the SELL row is inserted (by ``execute_wallet_trade`` or
+    ``_execute_sell_without_zero_holding_update``). ``execute_trade`` always
+    calls this only after that insert in the same uncommitted transaction.
+    """
+    # Safe only when called after the SELL insert in execute_trade (same txn).
     if charge <= 0:
         with conn.cursor() as cur:
             cur.execute(
@@ -708,20 +769,21 @@ def _adjust_latest_sell_pnl(
 
 
 def _is_holding_quantity_check_violation(exc: BaseException) -> bool:
-    """Return True when a SELL failed because holdings quantity would go negative."""
-    try:
-        from psycopg2.errors import CheckViolation
-    except ImportError:
-        CheckViolation = ()  # type: ignore[misc, assignment]
+    """Return True only for the holdings quantity CHECK constraint failure.
 
-    if isinstance(exc, CheckViolation):
-        return True
+    Parameters
+    ----------
+    exc
+        Exception raised while executing a SELL.
 
+    Returns
+    -------
+    bool
+        ``True`` when the error message names
+        ``portfolio_holdings_quantity_check`` (not other CHECK constraints).
+    """
     message = str(exc).lower()
-    return (
-        "portfolio_holdings_quantity_check" in message
-        or "violates check constraint" in message
-    )
+    return "portfolio_holdings_quantity_check" in message
 
 
 def _execute_sell_without_zero_holding_update(
@@ -732,7 +794,42 @@ def _execute_sell_without_zero_holding_update(
     price: float,
     wallet_id: str = ADMIN_WALLET_ID,
 ) -> None:
-    """Full/near-full SELL without writing quantity=0 (avoids check constraint)."""
+    """Execute a SELL without writing a zero holding quantity.
+
+    Used for full exits (or float dust under ``QUANTITY_EPSILON``) and as a
+    fallback when ``execute_wallet_trade`` trips
+    ``portfolio_holdings_quantity_check``.
+
+    Parameters
+    ----------
+    conn
+        Open psycopg2 connection; caller commits or rolls back.
+    ticker
+        Exchange-qualified instrument symbol.
+    quantity
+        Shares to sell; must not exceed the current holding.
+    price
+        Execution reference price per share.
+    wallet_id
+        Paper wallet UUID.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    ValueError
+        If there is no open position, ``quantity`` exceeds held amount, or the
+        wallet row is missing.
+
+    Notes
+    -----
+    Weighted-average cost basis: on a **partial** sell, ``avg_entry`` is
+    intentionally left unchanged (same as ``execute_wallet_trade``). Only
+    ``quantity`` is reduced. Realized PnL uses the existing ``avg_entry`` for
+    the sold lot; remaining shares keep that same average.
+    """
     total = quantity * price
     with conn.cursor() as cur:
         cur.execute(
@@ -768,7 +865,7 @@ def _execute_sell_without_zero_holding_update(
         )
         cash_row = cur.fetchone()
         if not cash_row:
-            raise ValueError(f"Wallet not found: {wallet_id}")
+            raise ValueError(f"Wallet account row missing for id={wallet_id}")
 
         if remaining_qty <= 0:
             cur.execute(
@@ -784,6 +881,8 @@ def _execute_sell_without_zero_holding_update(
                 (wallet_id, ticker),
             )
         else:
+            # Avg-cost accounting: keep avg_entry; only reduce quantity
+            # (matches execute_wallet_trade partial-sell path).
             cur.execute(
                 """
                 UPDATE portfolio_holdings
@@ -828,12 +927,37 @@ def execute_trade(
     price: float,
     wallet_id: str = ADMIN_WALLET_ID,
 ) -> float | None:
-    """Execute paper trade, then deduct per-leg txn charge and net SELL PnL.
+    """Execute a paper trade, deduct per-leg charge, and net SELL PnL.
+
+    Parameters
+    ----------
+    conn
+        Open psycopg2 connection. All steps share one transaction; this
+        function commits on success. Callers should not assume intermediate
+        state is durable before return.
+    ticker
+        Exchange-qualified instrument symbol.
+    action
+        ``BUY`` or ``SELL``.
+    quantity
+        Share quantity (caller applies whole/fractional policy).
+    price
+        Validated execution reference price.
+    wallet_id
+        Paper wallet UUID.
 
     Returns
     -------
     float | None
-        Net realized PnL for ``SELL`` (after sell charge), otherwise ``None``.
+        For ``SELL``: net ``realized_pnl`` after the sell-leg charge (may be
+        ``None`` only if the trade row has null PnL). For ``BUY``: always
+        ``None``. Failures raise; they do not return ``None``.
+
+    Raises
+    ------
+    ValueError
+        Insufficient cash for ``BUY`` (after charge + reserve), no position /
+        oversize for ``SELL``, or missing wallet row during charge deduction.
     """
     ticker = ticker.upper()
     charge = transaction_charge_for_action(action)

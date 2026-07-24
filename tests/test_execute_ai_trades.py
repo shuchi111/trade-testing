@@ -36,6 +36,8 @@ class DecideAndExecuteTests(unittest.TestCase):
                     "decision": "BUY",
                     "final_trade_decision": "",
                     "reference_price": reference_price,
+                    "ai_confidence_pct": 100.0,
+                    "risk_reward_ratio": 2.0,
                 },
             ),
             patch.object(

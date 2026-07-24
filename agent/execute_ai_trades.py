@@ -56,6 +56,9 @@ from trading_constraints import (
     max_position_inr,
     min_wallet_cash_reserve_inr,
     sell_transaction_charge_inr,
+    sized_buy_budget_inr,
+    confidence_buy_scale,
+    min_ai_confidence_pct,
 )
 
 logger = logging.getLogger("execute_ai_trades")
@@ -115,26 +118,61 @@ def load_settings(conn) -> dict:
 
 
 def latest_recommendation(conn, ticker: str, trade_date: str) -> dict | None:
+    def _row_to_reco(row, *, has_metrics: bool) -> dict:
+        conf = float(row[5]) if has_metrics and row[5] is not None else None
+        rr = float(row[6]) if has_metrics and len(row) > 6 and row[6] is not None else None
+        if conf is None:
+            try:
+                from tradingagents.graph.confidence_extraction import (
+                    parse_explicit_confidence_pct,
+                )
+
+                conf = parse_explicit_confidence_pct(
+                    f"{row[1] or ''}\n{row[2] or ''}"
+                )
+            except Exception:
+                conf = None
+        return {
+            "id": str(row[0]),
+            "decision": row[1] or "",
+            "final_trade_decision": row[2] or "",
+            "reference_price": float(row[3]) if row[3] is not None else None,
+            "ai_confidence_pct": conf,
+            "risk_reward_ratio": rr,
+        }
+
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id, decision, final_trade_decision, reference_price, computed_at
-            FROM ai_recommendation_cache
-            WHERE UPPER(ticker) = UPPER(%s) AND trade_date = %s::date
-            ORDER BY computed_at DESC
-            LIMIT 1
-            """,
-            (ticker, trade_date),
-        )
-        row = cur.fetchone()
-    if not row:
-        return None
-    return {
-        "id": str(row[0]),
-        "decision": row[1] or "",
-        "final_trade_decision": row[2] or "",
-        "reference_price": float(row[3]) if row[3] is not None else None,
-    }
+        try:
+            cur.execute(
+                """
+                SELECT id, decision, final_trade_decision, reference_price, computed_at,
+                       ai_confidence_pct, risk_reward_ratio
+                FROM ai_recommendation_cache
+                WHERE UPPER(ticker) = UPPER(%s) AND trade_date = %s::date
+                ORDER BY computed_at DESC
+                LIMIT 1
+                """,
+                (ticker, trade_date),
+            )
+            row = cur.fetchone()
+            if row:
+                return _row_to_reco(row, has_metrics=True)
+        except Exception:
+            conn.rollback()
+            cur.execute(
+                """
+                SELECT id, decision, final_trade_decision, reference_price, computed_at
+                FROM ai_recommendation_cache
+                WHERE UPPER(ticker) = UPPER(%s) AND trade_date = %s::date
+                ORDER BY computed_at DESC
+                LIMIT 1
+                """,
+                (ticker, trade_date),
+            )
+            row = cur.fetchone()
+            if row:
+                return _row_to_reco(row, has_metrics=False)
+    return None
 
 
 def load_prior_execution(conn, ticker: str, trade_date: str, dry_run: bool) -> dict | None:
@@ -356,29 +394,37 @@ def decide_and_execute(
                 if cash <= buy_charge + min_cash_inr:
                     action, skip_reason = "SKIP", "insufficient_cash"
                 else:
-                    cash_for_trade = max(0.0, cash - buy_charge - min_cash_inr)
-                    buy_value = min(cash_for_trade, room_to_cap)
-                    if fractional and buy_value < min_notional:
-                        action, skip_reason = "SKIP", "below_min_crypto_notional"
-                    elif not fractional and buy_value < price:
-                        action, skip_reason = "SKIP", "insufficient_cash_for_whole_share"
-                    else:
-                        qty = size_buy_quantity(
-                            buy_value_inr=buy_value,
-                            price_inr=price,
-                            fractional=fractional,
+                    conf = reco.get("ai_confidence_pct")
+                    scale = confidence_buy_scale(conf)
+                    if scale <= 0:
+                        action, skip_reason = (
+                            "SKIP",
+                            f"confidence_below_{min_ai_confidence_pct():.0f}",
                         )
-                        cost = qty * price
-                        if qty <= 0:
-                            skip = (
-                                "below_min_crypto_notional"
-                                if fractional
-                                else "insufficient_cash_for_whole_share"
-                            )
-                            action, skip_reason = "SKIP", skip
-                        elif cost + buy_charge + min_cash_inr > cash:
+                    else:
+                        cash_for_trade = max(0.0, cash - buy_charge - min_cash_inr)
+                        # ₹25k room_to_cap is a CEILING only; AI confidence scales the fill.
+                        # No risk-% / equity sizing — confidence only.
+                        buy_value = sized_buy_budget_inr(
+                            cash_available=cash_for_trade,
+                            room_to_cap=room_to_cap,
+                            confidence_pct=conf,
+                        )
+                        logger.info(
+                            "BUY size %s conf=%s scale=%.2f room=%.0f budget=%.0f",
+                            ticker,
+                            conf,
+                            scale,
+                            room_to_cap,
+                            buy_value,
+                        )
+                        if fractional and buy_value < min_notional:
+                            action, skip_reason = "SKIP", "below_min_crypto_notional"
+                        elif not fractional and buy_value < price:
+                            action, skip_reason = "SKIP", "insufficient_cash_for_whole_share"
+                        else:
                             qty = size_buy_quantity(
-                                buy_value_inr=max(0.0, cash - buy_charge - min_cash_inr),
+                                buy_value_inr=buy_value,
                                 price_inr=price,
                                 fractional=fractional,
                             )
@@ -390,10 +436,30 @@ def decide_and_execute(
                                     else "insufficient_cash_for_whole_share"
                                 )
                                 action, skip_reason = "SKIP", skip
+                            elif cost + buy_charge + min_cash_inr > cash:
+                                qty = size_buy_quantity(
+                                    buy_value_inr=max(
+                                        0.0,
+                                        min(
+                                            cash - buy_charge - min_cash_inr,
+                                            buy_value,
+                                        ),
+                                    ),
+                                    price_inr=price,
+                                    fractional=fractional,
+                                )
+                                cost = qty * price
+                                if qty <= 0:
+                                    skip = (
+                                        "below_min_crypto_notional"
+                                        if fractional
+                                        else "insufficient_cash_for_whole_share"
+                                    )
+                                    action, skip_reason = "SKIP", skip
+                                else:
+                                    action = "BUY"
                             else:
                                 action = "BUY"
-                        else:
-                            action = "BUY"
 
     elif bucket == "sell":
         if hold_qty <= 0:

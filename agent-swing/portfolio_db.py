@@ -14,29 +14,24 @@ MAX_POSITION_INR = 25_000.0
 MIN_WALLET_CASH_RESERVE_INR = 5_000.0
 SWING_EXIT_WINDOW_DAYS = 90
 TRAILING_STOP_LOSS_PCT = 5.0
+# Treat remainder at or below this as a full exit so we DELETE the holding
+# instead of writing quantity≈0 (trips portfolio_holdings_quantity_check).
+# Needed for fractional crypto lots; 1e-6 is far below any whole-share NSE lot.
 QUANTITY_EPSILON = 1e-6
-DEFAULT_BUY_TRANSACTION_CHARGE_INR = 0.0
-DEFAULT_SELL_TRANSACTION_CHARGE_INR = 150.0
-
-
 def _transaction_charge_for_action(action: str) -> float:
-    """Flat INR charge for this trade leg (0 if disabled for that side)."""
+    """Flat INR charge for this trade leg (0 if disabled for that side).
+
+    Defaults match agent/: BUY ₹0, SELL ₹150 via SELL_TRANSACTION_CHARGE_INR.
+    """
+    from trading_constraints import (
+        buy_transaction_charge_inr,
+        sell_transaction_charge_inr,
+    )
+
     if action == "BUY":
-        raw = os.getenv(
-            "BUY_TRANSACTION_CHARGE_INR", str(DEFAULT_BUY_TRANSACTION_CHARGE_INR)
-        ).strip()
-        try:
-            return max(0.0, float(raw))
-        except ValueError:
-            return DEFAULT_BUY_TRANSACTION_CHARGE_INR
+        return buy_transaction_charge_inr()
     if action == "SELL":
-        raw = os.getenv(
-            "SELL_TRANSACTION_CHARGE_INR", str(DEFAULT_SELL_TRANSACTION_CHARGE_INR)
-        ).strip()
-        try:
-            return max(0.0, float(raw))
-        except ValueError:
-            return DEFAULT_SELL_TRANSACTION_CHARGE_INR
+        return sell_transaction_charge_inr()
     return 0.0
 
 
@@ -187,6 +182,22 @@ def days_held_for_entry(entry_time: Any, as_of: date) -> int | None:
     return max(0, (as_of - entry_time).days)
 
 
+def holding_days_for_ticker(conn, ticker: str) -> int | None:
+    """Calendar days since current open lot started (from entry_time)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT entry_time FROM portfolio_holdings
+            WHERE wallet_id = %s AND UPPER(ticker) = UPPER(%s) AND quantity > 0
+            """,
+            (ADMIN_WALLET_ID, ticker),
+        )
+        row = cur.fetchone()
+    if not row or row[0] is None:
+        return None
+    return days_held_for_entry(row[0], date.today())
+
+
 def current_open_position_since(conn, ticker: str) -> date | None:
     """Date when the current uninterrupted open position first became positive."""
     try:
@@ -241,6 +252,107 @@ def load_active_trailing_stop(conn, ticker: str) -> dict[str, Any] | None:
         "highest_price": float(row[4] or 0),
         "current_stop_price": float(row[5] or 0),
     }
+
+
+def ensure_active_trailing_stop(
+    conn,
+    *,
+    ticker: str,
+    quantity: float,
+    entry_price: float,
+    latest_price: float,
+) -> dict[str, Any] | None:
+    """Create a 5% trailing stop row when missing for an open holding."""
+    active = load_active_trailing_stop(conn, ticker)
+    if active:
+        return active
+    if quantity <= 0 or latest_price <= 0:
+        return None
+    entry = entry_price if entry_price > 0 else latest_price
+    anchor = max(entry, latest_price)
+    pct = TRAILING_STOP_LOSS_PCT
+    stop_price = round(anchor * (1 - pct / 100.0), 4)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO portfolio_trailing_stops (
+                  wallet_id, ticker, quantity, entry_price, trailing_pct,
+                  highest_price, current_stop_price, status
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'ACTIVE')
+                RETURNING id, quantity, entry_price, trailing_pct, highest_price, current_stop_price
+                """,
+                (ADMIN_WALLET_ID, ticker.upper(), quantity, entry, pct, anchor, stop_price),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        return load_active_trailing_stop(conn, ticker)
+    if not row:
+        return load_active_trailing_stop(conn, ticker)
+    return {
+        "id": str(row[0]),
+        "quantity": float(row[1] or 0),
+        "entry_price": float(row[2] or 0),
+        "trailing_pct": float(row[3] or pct),
+        "highest_price": float(row[4] or 0),
+        "current_stop_price": float(row[5] or 0),
+    }
+
+
+def evaluate_trailing_stop(conn, ticker: str, current_price: float) -> dict[str, Any] | None:
+    """Update active stop on new highs; return breach details when stop is hit."""
+    stop = load_active_trailing_stop(conn, ticker)
+    if not stop or current_price <= 0:
+        return None
+
+    if current_price <= stop["current_stop_price"]:
+        return {"status": "BREACHED", **stop}
+
+    highest = max(stop["highest_price"], current_price)
+    pct = stop["trailing_pct"] or TRAILING_STOP_LOSS_PCT
+    next_stop = round(highest * (1 - pct / 100.0), 4)
+    if highest != stop["highest_price"] or next_stop != stop["current_stop_price"]:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE portfolio_trailing_stops
+                   SET highest_price = %s, current_stop_price = %s, updated_at = now()
+                 WHERE id = %s
+                """,
+                (highest, next_stop, stop["id"]),
+            )
+        conn.commit()
+        stop = {**stop, "highest_price": highest, "current_stop_price": next_stop}
+    return {"status": "ACTIVE", **stop}
+
+
+def mark_trailing_stop_triggered(conn, stop_id: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE portfolio_trailing_stops
+               SET status = 'TRIGGERED', closed_at = now(), updated_at = now()
+             WHERE id = %s
+            """,
+            (stop_id,),
+        )
+
+
+def load_open_holding_tickers(conn) -> list[str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT UPPER(ticker)
+              FROM portfolio_holdings
+             WHERE wallet_id = %s AND quantity > 0
+             ORDER BY 1
+            """,
+            (ADMIN_WALLET_ID,),
+        )
+        return [str(r[0]) for r in cur.fetchall()]
 
 
 def load_recent_wallet_trades(conn, limit: int = 10) -> list[dict[str, Any]]:
@@ -841,7 +953,31 @@ def build_analysis_context(
 def _deduct_transaction_charge(
     conn, *, ticker: str, action: str, wallet_id: str = ADMIN_WALLET_ID
 ) -> float:
-    """Withdraw flat transaction charge from wallet (ledger type WITHDRAWAL)."""
+    """Withdraw flat transaction charge from wallet (ledger type WITHDRAWAL).
+
+    Parameters
+    ----------
+    conn
+        Open psycopg2 connection. UPDATE + INSERT run in the caller's open
+        transaction; ``execute_trade`` commits after this returns. On failure
+        the caller must ``rollback()`` so cash and ledger stay consistent.
+    ticker
+        Instrument symbol included in the ledger ``note``.
+    action
+        Trade side (``BUY`` / ``SELL``); selects the charge amount.
+    wallet_id
+        Target paper wallet UUID.
+
+    Returns
+    -------
+    float
+        Charge amount deducted (``0.0`` when the side charge is disabled).
+
+    Raises
+    ------
+    ValueError
+        If no ``wallet_accounts`` row exists for ``wallet_id``.
+    """
     charge = _transaction_charge_for_action(action)
     if charge <= 0:
         return 0.0
@@ -857,7 +993,7 @@ def _deduct_transaction_charge(
         )
         row = cur.fetchone()
         if not row:
-            raise ValueError(f"Wallet not found: {wallet_id}")
+            raise ValueError(f"Wallet account row missing for id={wallet_id}")
         cash_after = float(row[0])
         cur.execute(
             """
@@ -868,7 +1004,11 @@ def _deduct_transaction_charge(
                 wallet_id,
                 charge,
                 cash_after,
-                f"txn_charge {action} {ticker.upper()}",
+                (
+                    f"Sell fee ₹{charge:,.0f} · {ticker.upper()}"
+                    if action.upper() == "SELL"
+                    else f"Buy fee ₹{charge:,.0f} · {ticker.upper()}"
+                ),
             ),
         )
     return charge
@@ -877,7 +1017,12 @@ def _deduct_transaction_charge(
 def _adjust_latest_sell_pnl(
     conn, ticker: str, charge: float, wallet_id: str = ADMIN_WALLET_ID
 ) -> float | None:
-    """Subtract sell-leg charge from the most recent SELL row (net realized PnL)."""
+    """Subtract sell-leg charge from the most recent SELL row (net realized PnL).
+
+    Must run **after** the SELL row is inserted in the same uncommitted
+    transaction (``execute_trade`` enforces that call order).
+    """
+    # Safe only when called after the SELL insert in execute_trade (same txn).
     if charge <= 0:
         with conn.cursor() as cur:
             cur.execute(
@@ -910,19 +1055,9 @@ def _adjust_latest_sell_pnl(
 
 
 def _is_holding_quantity_check_violation(exc: BaseException) -> bool:
-    try:
-        from psycopg2.errors import CheckViolation
-    except ImportError:
-        CheckViolation = ()  # type: ignore[misc, assignment]
-
-    if isinstance(exc, CheckViolation):
-        return True
-
+    """Return True only for portfolio_holdings_quantity_check failures."""
     message = str(exc).lower()
-    return (
-        "portfolio_holdings_quantity_check" in message
-        or "violates check constraint" in message
-    )
+    return "portfolio_holdings_quantity_check" in message
 
 
 def _execute_sell_without_zero_holding_update(
@@ -933,7 +1068,14 @@ def _execute_sell_without_zero_holding_update(
     price: float,
     wallet_id: str = ADMIN_WALLET_ID,
 ) -> None:
-    """Full/near-full SELL without writing quantity=0 (avoids check constraint)."""
+    """Execute a SELL without writing a zero holding quantity.
+
+    Notes
+    -----
+    Weighted-average cost basis: on a **partial** sell, ``avg_entry`` is
+    intentionally left unchanged (same as ``execute_wallet_trade``). Only
+    ``quantity`` is reduced.
+    """
     total = quantity * price
     with conn.cursor() as cur:
         cur.execute(
@@ -969,7 +1111,7 @@ def _execute_sell_without_zero_holding_update(
         )
         cash_row = cur.fetchone()
         if not cash_row:
-            raise ValueError(f"Wallet not found: {wallet_id}")
+            raise ValueError(f"Wallet account row missing for id={wallet_id}")
 
         if remaining_qty <= 0:
             cur.execute(
@@ -985,6 +1127,7 @@ def _execute_sell_without_zero_holding_update(
                 (wallet_id, ticker),
             )
         else:
+            # Avg-cost accounting: keep avg_entry; only reduce quantity.
             cur.execute(
                 """
                 UPDATE portfolio_holdings
@@ -1029,7 +1172,14 @@ def execute_trade(
     price: float,
     wallet_id: str = ADMIN_WALLET_ID,
 ) -> float | None:
-    """Execute paper trade, then deduct per-leg txn charge and net SELL PnL."""
+    """Execute a paper trade, deduct per-leg charge, and net SELL PnL.
+
+    Returns
+    -------
+    float | None
+        For ``SELL``: net ``realized_pnl`` after sell charge. For ``BUY``:
+        always ``None``. Failures raise; they do not return ``None``.
+    """
     ticker = ticker.upper()
     charge = _transaction_charge_for_action(action)
     use_manual_sell = False

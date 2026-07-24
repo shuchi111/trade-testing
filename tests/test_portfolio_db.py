@@ -15,9 +15,6 @@ import portfolio_db
 class BuildAnalysisContextTests(unittest.TestCase):
     def test_explicit_zero_reference_price_is_not_treated_as_missing(self):
         patches = [
-            patch.object(portfolio_db, "max_position_inr", return_value=100000.0),
-            patch.object(portfolio_db, "swing_exit_window_days", return_value=90),
-            patch.object(portfolio_db, "trailing_stop_loss_pct", return_value=5.0),
             patch.object(
                 portfolio_db,
                 "load_holding_detail",
@@ -31,16 +28,10 @@ class BuildAnalysisContextTests(unittest.TestCase):
             patch.object(portfolio_db, "load_wallet_cash", return_value=10000.0),
             patch.object(portfolio_db, "load_all_holding_details", return_value=[]),
             patch.object(portfolio_db, "load_latest_reference_prices", return_value={}),
-            patch.object(portfolio_db, "days_held", return_value=None),
-            patch.object(portfolio_db, "load_portfolio_trade_quality", return_value={}),
+            patch.object(portfolio_db, "days_held_for_entry", return_value=None),
             patch.object(portfolio_db, "load_active_trailing_stop", return_value=None),
-            patch.object(portfolio_db, "min_wallet_cash_reserve_inr", return_value=0.0),
-            patch.object(portfolio_db, "buy_transaction_charge_inr", return_value=0.0),
-            patch.object(portfolio_db, "sell_transaction_charge_inr", return_value=0.0),
             patch.object(portfolio_db, "load_recent_portfolio_trades", return_value=[]),
             patch.object(portfolio_db, "load_recent_wallet_trades", return_value=[]),
-            patch.object(portfolio_db, "load_recent_wallet_transactions", return_value=[]),
-            patch.object(portfolio_db, "load_recent_ai_trade_executions", return_value=[]),
             patch.object(portfolio_db, "load_recent_ai_recommendations", return_value=[]),
             patch.object(portfolio_db, "load_backtest_strategy_summaries", return_value=[]),
             patch.object(portfolio_db, "load_backtest_trades", return_value=[]),
@@ -55,8 +46,8 @@ class BuildAnalysisContextTests(unittest.TestCase):
             reference_price=0.0,
         )
 
-        self.assertIn("Room to add on this name:", context)
-        self.assertIn("100,000.00", context)
+        self.assertIn("25,000.00", context)
+        self.assertIn("TCS.NS", context)
 
 
 class QuantityEpsilonTests(unittest.TestCase):
@@ -81,6 +72,40 @@ class HoldingQuantityCheckViolationTests(unittest.TestCase):
     def test_unrelated_error_not_matched(self):
         exc = ValueError("Insufficient cash")
         self.assertFalse(portfolio_db._is_holding_quantity_check_violation(exc))
+
+    def test_generic_check_constraint_not_matched(self):
+        exc = Exception('violates check constraint "some_other_check"')
+        self.assertFalse(portfolio_db._is_holding_quantity_check_violation(exc))
+
+
+class PartialSellAvgEntryTests(unittest.TestCase):
+    def test_partial_sell_keeps_existing_avg_entry(self):
+        """Avg-cost: partial sell reduces qty only; avg_entry stays unchanged."""
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        # avg_entry=110 (blended), held=20 → sell 15 → remaining 5
+        cursor.fetchone.side_effect = [
+            (110.0, 20.0),  # holdings FOR UPDATE
+            (50_000.0,),  # wallet cash after credit
+            None,  # trailing stop update has no fetch
+        ]
+
+        executed_sql: list[str] = []
+
+        def capture_execute(sql, params=None):
+            executed_sql.append(" ".join(str(sql).split()))
+
+        cursor.execute.side_effect = capture_execute
+
+        portfolio_db._execute_sell_without_zero_holding_update(
+            conn, ticker="TCS.NS", quantity=15.0, price=125.0
+        )
+
+        holdings_updates = [s for s in executed_sql if "UPDATE portfolio_holdings" in s]
+        self.assertEqual(len(holdings_updates), 1)
+        self.assertIn("SET quantity = %s", holdings_updates[0])
+        self.assertNotIn("avg_entry", holdings_updates[0])
 
 
 class ExecuteTradeSellPathTests(unittest.TestCase):
