@@ -44,16 +44,33 @@ from portfolio_db import (
     ADMIN_WALLET_ID,
     MAX_POSITION_INR,
     MIN_WALLET_CASH_RESERVE_INR,
+    ensure_active_trailing_stop,
+    evaluate_trailing_stop,
     execute_trade,
     load_holding,
+    load_open_holding_tickers,
     load_wallet_cash,
+    mark_trailing_stop_triggered,
 )
 from recommendation_bucket import is_overweight, recommendation_bucket
 from trade_lessons import portfolio_quality_blocks_new_risk, recent_loss_blocks_buy
+from trading_constraints import (
+    confidence_buy_scale,
+    min_ai_confidence_pct,
+    sell_transaction_charge_inr,
+    sized_buy_budget_inr,
+)
 
 logger = logging.getLogger("execute_ai_trades")
 
 SETTINGS_ID = "00000000-0000-0000-0000-000000000002"
+
+
+def trade_block_skip_reason(exc: ValueError) -> str:
+    message = str(exc).lower()
+    if "no open position" in message or "cannot sell" in message:
+        return "no_position_to_sell"
+    return "insufficient_cash"
 
 
 def load_settings(conn) -> dict:
@@ -84,42 +101,136 @@ def load_settings(conn) -> dict:
 
 
 def latest_recommendation(conn, ticker: str, trade_date: str) -> dict | None:
+    """Load latest reco + AI confidence for confidence-proportional BUY sizing."""
+
+    def _from_row(row, *, has_metrics: bool, has_final: bool) -> dict:
+        # Column layouts:
+        # metrics+final: id, decision, final_trade_decision, reference_price, ai_confidence_pct, risk_reward_ratio
+        # metrics only:  id, decision, reference_price, ai_confidence_pct, risk_reward_ratio
+        if has_final:
+            decision = row[1] or ""
+            final_td = row[2] or ""
+            ref = row[3]
+            conf_idx, rr_idx = 4, 5
+        else:
+            decision = row[1] or ""
+            final_td = ""
+            ref = row[2]
+            conf_idx, rr_idx = 3, 4
+
+        conf = None
+        rr = None
+        if has_metrics:
+            if row[conf_idx] is not None:
+                conf = float(row[conf_idx])
+            if len(row) > rr_idx and row[rr_idx] is not None:
+                rr = float(row[rr_idx])
+        if conf is None:
+            try:
+                from tradingagents.graph.confidence_extraction import (
+                    parse_explicit_confidence_pct,
+                )
+
+                conf = parse_explicit_confidence_pct(f"{decision}\n{final_td}")
+            except Exception:
+                conf = None
+        return {
+            "id": str(row[0]),
+            "decision": decision,
+            "final_trade_decision": final_td,
+            "reference_price": float(ref) if ref is not None else None,
+            "ai_confidence_pct": conf,
+            "risk_reward_ratio": rr,
+        }
+
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id, decision, reference_price, computed_at
-            FROM ai_recommendation_cache
-            WHERE UPPER(ticker) = UPPER(%s) AND trade_date = %s::date
-            ORDER BY computed_at DESC
-            LIMIT 1
-            """,
-            (ticker, trade_date),
-        )
-        row = cur.fetchone()
-        if row:
-            return {
-                "id": str(row[0]),
-                "decision": row[1] or "",
-                "reference_price": float(row[2]) if row[2] is not None else None,
-            }
-        cur.execute(
-            """
-            SELECT id, decision, reference_price, computed_at
-            FROM ai_recommendation_cache
-            WHERE UPPER(ticker) = UPPER(%s)
-            ORDER BY computed_at DESC
-            LIMIT 1
-            """,
-            (ticker,),
-        )
-        row = cur.fetchone()
-    if not row:
-        return None
-    return {
-        "id": str(row[0]),
-        "decision": row[1] or "",
-        "reference_price": float(row[2]) if row[2] is not None else None,
-    }
+        try:
+            cur.execute(
+                """
+                SELECT id, decision, final_trade_decision, reference_price,
+                       ai_confidence_pct, risk_reward_ratio
+                FROM ai_recommendation_cache
+                WHERE UPPER(ticker) = UPPER(%s) AND trade_date = %s::date
+                ORDER BY computed_at DESC
+                LIMIT 1
+                """,
+                (ticker, trade_date),
+            )
+            row = cur.fetchone()
+            if row:
+                return _from_row(row, has_metrics=True, has_final=True)
+            cur.execute(
+                """
+                SELECT id, decision, final_trade_decision, reference_price,
+                       ai_confidence_pct, risk_reward_ratio
+                FROM ai_recommendation_cache
+                WHERE UPPER(ticker) = UPPER(%s)
+                ORDER BY computed_at DESC
+                LIMIT 1
+                """,
+                (ticker,),
+            )
+            row = cur.fetchone()
+            if row:
+                return _from_row(row, has_metrics=True, has_final=True)
+        except Exception:
+            conn.rollback()
+            try:
+                cur.execute(
+                    """
+                    SELECT id, decision, reference_price, ai_confidence_pct, risk_reward_ratio
+                    FROM ai_recommendation_cache
+                    WHERE UPPER(ticker) = UPPER(%s) AND trade_date = %s::date
+                    ORDER BY computed_at DESC
+                    LIMIT 1
+                    """,
+                    (ticker, trade_date),
+                )
+                row = cur.fetchone()
+                if row:
+                    return _from_row(row, has_metrics=True, has_final=False)
+                cur.execute(
+                    """
+                    SELECT id, decision, reference_price, ai_confidence_pct, risk_reward_ratio
+                    FROM ai_recommendation_cache
+                    WHERE UPPER(ticker) = UPPER(%s)
+                    ORDER BY computed_at DESC
+                    LIMIT 1
+                    """,
+                    (ticker,),
+                )
+                row = cur.fetchone()
+                if row:
+                    return _from_row(row, has_metrics=True, has_final=False)
+            except Exception:
+                conn.rollback()
+                cur.execute(
+                    """
+                    SELECT id, decision, reference_price
+                    FROM ai_recommendation_cache
+                    WHERE UPPER(ticker) = UPPER(%s) AND trade_date = %s::date
+                    ORDER BY computed_at DESC
+                    LIMIT 1
+                    """,
+                    (ticker, trade_date),
+                )
+                row = cur.fetchone()
+                if row:
+                    return _from_row(row, has_metrics=False, has_final=False)
+                cur.execute(
+                    """
+                    SELECT id, decision, reference_price
+                    FROM ai_recommendation_cache
+                    WHERE UPPER(ticker) = UPPER(%s)
+                    ORDER BY computed_at DESC
+                    LIMIT 1
+                    """,
+                    (ticker,),
+                )
+                row = cur.fetchone()
+                if row:
+                    return _from_row(row, has_metrics=False, has_final=False)
+    return None
 
 
 def load_prior_execution(conn, ticker: str, trade_date: str, dry_run: bool) -> dict | None:
@@ -202,6 +313,126 @@ def log_execution(conn, *, ticker, trade_date, decision, action, qty, price, pnl
     conn.commit()
 
 
+def _force_trailing_stop_sell(
+    conn,
+    *,
+    ticker: str,
+    trade_date: str,
+    dry_run: bool,
+    settings: dict,
+    force: bool,
+    hold_qty: float,
+    avg_entry: float,
+    price: float,
+    decision: str,
+    recommendation_id: str | None,
+) -> dict | None:
+    """If trail breached, force-SELL and return result dict; else None."""
+    if hold_qty <= 0 or price <= 0:
+        return None
+
+    ensure_active_trailing_stop(
+        conn,
+        ticker=ticker,
+        quantity=hold_qty,
+        entry_price=avg_entry,
+        latest_price=price,
+    )
+    trailing = evaluate_trailing_stop(conn, ticker, price)
+    if not trailing or trailing.get("status") != "BREACHED":
+        return None
+
+    action = "SELL"
+    qty = hold_qty
+    skip_reason = "trailing_stop_5pct"
+    executed = False
+    pnl = None
+
+    if not settings.get("auto_trade", True) and not force:
+        action, qty, skip_reason = "SKIP", 0.0, "auto_trade_disabled"
+    elif not dry_run:
+        try:
+            net_pnl = execute_trade(conn, ticker=ticker, action="SELL", quantity=qty, price=price)
+            executed = True
+            mark_trailing_stop_triggered(conn, trailing["id"])
+            conn.commit()
+            if net_pnl is not None:
+                pnl = float(net_pnl)
+            elif avg_entry > 0:
+                # execute_trade already nets the fee into DB; mirror that in the log fallback.
+                pnl = (price - avg_entry) * qty - sell_transaction_charge_inr()
+        except ValueError as exc:
+            action, qty, skip_reason = "SKIP", 0.0, trade_block_skip_reason(exc)
+            logger.warning("Trailing stop sell blocked for %s: %s", ticker, exc)
+
+    log_execution(
+        conn,
+        ticker=ticker,
+        trade_date=trade_date,
+        decision=decision or "TRAILING_STOP",
+        action=action,
+        qty=qty if action == "SELL" else None,
+        price=price if action == "SELL" else None,
+        pnl=pnl,
+        recommendation_id=recommendation_id,
+        skip_reason=skip_reason,
+        dry_run=dry_run,
+    )
+    return {
+        "ok": True,
+        "ticker": ticker,
+        "decision": decision or "TRAILING_STOP",
+        "action_taken": action,
+        "quantity": qty if action == "SELL" else None,
+        "price": price if action == "SELL" else None,
+        "executed": executed,
+        "dry_run": dry_run,
+        "skip_reason": skip_reason,
+    }
+
+
+def enforce_trailing_stops_all(
+    conn,
+    *,
+    trade_date: str,
+    dry_run: bool,
+    settings: dict,
+    force: bool = True,
+) -> list[dict]:
+    """Scan all open AI holdings and force-SELL any breached 5% trails."""
+    results: list[dict] = []
+    for ticker in load_open_holding_tickers(conn):
+        hold_qty, avg_entry = load_holding(conn, ticker)
+        price = quote_to_inr(ticker, fetch_last_close(ticker))
+        if not price or price <= 0:
+            results.append({"ok": True, "ticker": ticker, "action_taken": "SKIP", "skip_reason": "no_price"})
+            continue
+        out = _force_trailing_stop_sell(
+            conn,
+            ticker=ticker,
+            trade_date=trade_date,
+            dry_run=dry_run,
+            settings=settings,
+            force=force,
+            hold_qty=hold_qty,
+            avg_entry=avg_entry,
+            price=price,
+            decision="TRAILING_STOP",
+            recommendation_id=None,
+        )
+        if out is None:
+            results.append({
+                "ok": True,
+                "ticker": ticker,
+                "action_taken": "HOLD",
+                "skip_reason": "trail_active",
+                "price": price,
+            })
+        else:
+            results.append(out)
+    return results
+
+
 def decide_and_execute(
     conn,
     *,
@@ -213,6 +444,29 @@ def decide_and_execute(
 ) -> dict:
     ticker = ticker.strip().upper()
     reco = latest_recommendation(conn, ticker, trade_date)
+    hold_qty, avg_entry = load_holding(conn, ticker)
+
+    ref = reco["reference_price"] if reco else None
+    price = quote_to_inr(ticker, ref or fetch_last_close(ticker))
+
+    # Trailing stop runs BEFORE idempotency — prior HOLD/BUY today must not block a trail exit.
+    if hold_qty > 0 and price and price > 0:
+        stop_out = _force_trailing_stop_sell(
+            conn,
+            ticker=ticker,
+            trade_date=trade_date,
+            dry_run=dry_run,
+            settings=settings,
+            force=force,
+            hold_qty=hold_qty,
+            avg_entry=avg_entry,
+            price=price,
+            decision=(reco["decision"] if reco else "TRAILING_STOP"),
+            recommendation_id=(reco["id"] if reco else None),
+        )
+        if stop_out is not None:
+            return stop_out
+
     if not reco:
         log_execution(
             conn, ticker=ticker, trade_date=trade_date, decision="",
@@ -238,8 +492,6 @@ def decide_and_execute(
 
     decision = reco["decision"]
     bucket = recommendation_bucket(decision)
-    hold_qty, avg_entry = load_holding(conn, ticker)
-    price = quote_to_inr(ticker, reco["reference_price"] or fetch_last_close(ticker))
     if not price or price <= 0:
         log_execution(
             conn, ticker=ticker, trade_date=trade_date, decision=decision,
@@ -255,7 +507,6 @@ def decide_and_execute(
     action = "HOLD"
     qty = 0.0
     skip_reason = None
-    size_mult = 1.0
 
     fractional = is_fractional_ticker(ticker)
     min_notional = min_buy_notional_inr(ticker)
@@ -281,32 +532,41 @@ def decide_and_execute(
             elif cash <= MIN_WALLET_CASH_RESERVE_INR:
                 action, skip_reason = "SKIP", "insufficient_cash"
             else:
-                cash_after_hard_reserve = max(0.0, cash - MIN_WALLET_CASH_RESERVE_INR)
-                buy_value = min(cash_after_hard_reserve, room_to_cap)
-                if fractional and buy_value < min_notional:
-                    action, skip_reason = "SKIP", "below_min_crypto_notional"
-                elif not fractional and buy_value < price:
-                    action, skip_reason = "SKIP", "insufficient_cash_for_whole_share"
-                else:
-                    qty = size_buy_quantity(
-                        buy_value_inr=buy_value,
-                        price_inr=price,
-                        fractional=fractional,
+                conf = reco.get("ai_confidence_pct")
+                size_mult = confidence_buy_scale(conf)
+                if size_mult <= 0:
+                    action, skip_reason = (
+                        "SKIP",
+                        f"confidence_below_{min_ai_confidence_pct():.0f}",
                     )
-                    cost = qty * price
-                    if qty <= 0:
-                        skip = (
-                            "below_min_crypto_notional"
-                            if fractional
-                            else "insufficient_cash_for_whole_share"
-                        )
-                        action, skip_reason = "SKIP", skip
-                    elif cost + MIN_WALLET_CASH_RESERVE_INR > cash:
+                else:
+                    cash_after_hard_reserve = max(0.0, cash - MIN_WALLET_CASH_RESERVE_INR)
+                    # ₹25k room_to_cap is a CEILING only; AI confidence scales the fill.
+                    # No risk-% / equity sizing — confidence only.
+                    buy_value = sized_buy_budget_inr(
+                        cash_available=cash_after_hard_reserve,
+                        room_to_cap=room_to_cap,
+                        confidence_pct=conf,
+                    )
+                    logger.info(
+                        "BUY size %s conf=%s scale=%.2f room=%.0f budget=%.0f",
+                        ticker,
+                        conf,
+                        size_mult,
+                        room_to_cap,
+                        buy_value,
+                    )
+                    if fractional and buy_value < min_notional:
+                        action, skip_reason = "SKIP", "below_min_crypto_notional"
+                    elif not fractional and buy_value < price:
+                        action, skip_reason = "SKIP", "insufficient_cash_for_whole_share"
+                    else:
                         qty = size_buy_quantity(
-                            buy_value_inr=max(0.0, cash - MIN_WALLET_CASH_RESERVE_INR),
+                            buy_value_inr=buy_value,
                             price_inr=price,
                             fractional=fractional,
                         )
+                        cost = qty * price
                         if qty <= 0:
                             skip = (
                                 "below_min_crypto_notional"
@@ -314,10 +574,26 @@ def decide_and_execute(
                                 else "insufficient_cash_for_whole_share"
                             )
                             action, skip_reason = "SKIP", skip
+                        elif cost + MIN_WALLET_CASH_RESERVE_INR > cash:
+                            qty = size_buy_quantity(
+                                buy_value_inr=max(
+                                    0.0,
+                                    min(cash - MIN_WALLET_CASH_RESERVE_INR, buy_value),
+                                ),
+                                price_inr=price,
+                                fractional=fractional,
+                            )
+                            if qty <= 0:
+                                skip = (
+                                    "below_min_crypto_notional"
+                                    if fractional
+                                    else "insufficient_cash_for_whole_share"
+                                )
+                                action, skip_reason = "SKIP", skip
+                            else:
+                                action = "BUY"
                         else:
                             action = "BUY"
-                    else:
-                        action = "BUY"
 
     elif bucket == "sell":
         if hold_qty > 0:
@@ -335,10 +611,25 @@ def decide_and_execute(
     executed = False
     pnl = None
     if action in ("BUY", "SELL") and not dry_run:
-        execute_trade(conn, ticker=ticker, action=action, quantity=qty, price=price)
-        executed = True
-        if action == "SELL" and avg_entry > 0:
-            pnl = (price - avg_entry) * qty
+        try:
+            net_pnl = execute_trade(conn, ticker=ticker, action=action, quantity=qty, price=price)
+            executed = True
+            if action == "SELL":
+                if net_pnl is not None:
+                    pnl = float(net_pnl)
+                elif avg_entry > 0:
+                    pnl = (price - avg_entry) * qty - sell_transaction_charge_inr()
+            if action == "BUY":
+                ensure_active_trailing_stop(
+                    conn,
+                    ticker=ticker,
+                    quantity=hold_qty + qty,
+                    entry_price=avg_entry if avg_entry > 0 else price,
+                    latest_price=price,
+                )
+        except ValueError as exc:
+            action, skip_reason = "SKIP", trade_block_skip_reason(exc)
+            logger.warning("Trade blocked for %s: %s", ticker, exc)
 
     log_execution(
         conn, ticker=ticker, trade_date=trade_date, decision=decision,
@@ -366,6 +657,11 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Execute AI paper trades from recommendations")
     p.add_argument("--ticker", help="Single ticker (e.g. RELIANCE.NS)")
     p.add_argument("--all", action="store_true", help="All tickers with latest recommendation")
+    p.add_argument(
+        "--enforce-stops",
+        action="store_true",
+        help="Scan open holdings and force-SELL any breached 5%% trailing stops",
+    )
     p.add_argument("--trade-date", default="", help="YYYY-MM-DD (default: UTC today)")
     p.add_argument("--dry-run", action="store_true", help="Log only, no wallet trades")
     p.add_argument("--execute", action="store_true", help="Actually execute trades (overrides settings dry_run)")
@@ -389,6 +685,25 @@ def main() -> None:
         else:
             dry_run = settings.get("dry_run", False)
 
+        if args.enforce_stops:
+            results = enforce_trailing_stops_all(
+                conn,
+                trade_date=trade_date,
+                dry_run=dry_run,
+                settings=settings,
+                force=True,
+            )
+            for out in results:
+                logger.info("%s", out)
+            print(json.dumps({
+                "ok": True,
+                "mode": "enforce_stops",
+                "trade_date": trade_date,
+                "dry_run": dry_run,
+                "results": results,
+            }))
+            return
+
         tickers: list[str] = []
         if args.ticker:
             tickers = [args.ticker.strip().upper()]
@@ -399,7 +714,7 @@ def main() -> None:
                 )
                 tickers = [r[0] for r in cur.fetchall()]
         else:
-            logger.error("Provide --ticker or --all")
+            logger.error("Provide --ticker, --all, or --enforce-stops")
             sys.exit(1)
 
         results = []

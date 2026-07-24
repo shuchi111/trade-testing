@@ -177,3 +177,96 @@ def quality_expectancy_pct_of_cap() -> float:
         return float(raw)
     except ValueError:
         return DEFAULT_QUALITY_EXPECTANCY_PCT_OF_CAP
+
+
+# --- Confidence-proportional BUY sizing ---
+# ₹25k (MAX_POSITION_INR) is a hard CEILING, not the default fill size.
+# Remap [MIN_AI_CONFIDENCE_PCT .. 100] → [CONFIDENCE_AT_MIN_SCALE .. 1.0]
+# so 80% starts at half-cap (₹12,500) and only 100% takes full ₹25k.
+DEFAULT_MIN_AI_CONFIDENCE_PCT = 80.0
+# Missing / invalid confidence → SKIP (no guessing).
+DEFAULT_CONFIDENCE_MISSING_SCALE = 0.0
+# Fraction of room at the minimum allowed confidence (80% → ₹12,500 of ₹25k).
+DEFAULT_CONFIDENCE_AT_MIN_SCALE = 0.50
+
+
+def min_ai_confidence_pct() -> float:
+    """BUY skipped when confidence is present and below this (0 = disabled)."""
+    raw = os.getenv("MIN_AI_CONFIDENCE_PCT", str(DEFAULT_MIN_AI_CONFIDENCE_PCT)).strip()
+    try:
+        return min(100.0, max(0.0, float(raw)))
+    except ValueError:
+        return DEFAULT_MIN_AI_CONFIDENCE_PCT
+
+
+def confidence_missing_scale() -> float:
+    raw = os.getenv(
+        "CONFIDENCE_MISSING_SCALE", str(DEFAULT_CONFIDENCE_MISSING_SCALE)
+    ).strip()
+    try:
+        return min(1.0, max(0.0, float(raw)))
+    except ValueError:
+        return DEFAULT_CONFIDENCE_MISSING_SCALE
+
+
+def confidence_at_min_scale() -> float:
+    """Room fraction used when confidence equals the minimum bar (default 0.50)."""
+    raw = os.getenv(
+        "CONFIDENCE_AT_MIN_SCALE", str(DEFAULT_CONFIDENCE_AT_MIN_SCALE)
+    ).strip()
+    try:
+        return min(1.0, max(0.0, float(raw)))
+    except ValueError:
+        return DEFAULT_CONFIDENCE_AT_MIN_SCALE
+
+
+def confidence_buy_scale(confidence_pct: float | None) -> float:
+    """Map AI confidence (0–100) → fraction of room under the ₹25k cap.
+
+    * ``None`` / invalid → ``CONFIDENCE_MISSING_SCALE`` (default 0 → SKIP)
+    * below ``MIN_AI_CONFIDENCE_PCT`` (default 80) → ``0.0`` (SKIP)
+    * at min bar → ``CONFIDENCE_AT_MIN_SCALE`` (default 0.50 → ₹12,500)
+    * at 100 → ``1.0`` (full room / ₹25k)
+    * between → linear remap (no equity / stop-distance risk sizing)
+
+    Examples
+    --------
+    >>> confidence_buy_scale(100)
+    1.0
+    >>> confidence_buy_scale(80)
+    0.5
+    >>> confidence_buy_scale(None)
+    0.0
+    """
+    if confidence_pct is None:
+        return confidence_missing_scale()
+    try:
+        conf = float(confidence_pct)
+    except (TypeError, ValueError):
+        return confidence_missing_scale()
+    if not (conf == conf):  # NaN
+        return confidence_missing_scale()
+    conf = min(100.0, max(0.0, conf))
+    floor = min_ai_confidence_pct()
+    if floor > 0 and conf + 1e-9 < floor:
+        return 0.0
+    at_min = confidence_at_min_scale()
+    if conf + 1e-9 >= 100.0 or floor >= 100.0:
+        return 1.0
+    # Linear: floor → at_min, 100 → 1.0
+    t = (conf - floor) / (100.0 - floor)
+    return min(1.0, max(0.0, at_min + t * (1.0 - at_min)))
+
+
+def sized_buy_budget_inr(
+    *,
+    cash_available: float,
+    room_to_cap: float,
+    confidence_pct: float | None,
+) -> float:
+    """Confidence-scaled buy budget; ``room_to_cap`` / cash are hard ceilings."""
+    scale = confidence_buy_scale(confidence_pct)
+    if scale <= 0:
+        return 0.0
+    ceiling = min(max(0.0, cash_available), max(0.0, room_to_cap))
+    return ceiling * scale
